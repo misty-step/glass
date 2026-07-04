@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -227,6 +228,15 @@ pub struct DoctorReport {
     pub probe_session_id: String,
     pub probe_post_id: String,
     pub feedback_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSummary {
+    pub agent: String,
+    pub post_count: usize,
+    pub session_count: usize,
+    pub last_active_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -917,9 +927,57 @@ async fn recent_posts(
     State(glass): State<Glass>,
     Query(query): Query<RecentQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let posts = glass.list_recent_posts(query.limit.unwrap_or(30))?;
+    let sessions = glass.list_sessions()?;
+    let agents = summarize_agents(&posts, &sessions);
     Ok(Json(json!({
-        "posts": glass.list_recent_posts(query.limit.unwrap_or(30))?
+        "posts": posts,
+        "sessions": sessions,
+        "agents": agents,
     })))
+}
+
+fn summarize_agents(posts: &[Post], sessions: &[Session]) -> Vec<AgentSummary> {
+    #[derive(Default)]
+    struct AgentAccumulator {
+        post_count: usize,
+        session_ids: BTreeSet<String>,
+        last_active_at: i64,
+    }
+
+    let session_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let mut by_agent = BTreeMap::<String, AgentAccumulator>::new();
+    for post in posts {
+        let Some(session) = session_by_id.get(post.session_id.as_str()) else {
+            continue;
+        };
+        let entry = by_agent.entry(session.agent.clone()).or_default();
+        entry.post_count += 1;
+        entry.session_ids.insert(session.id.clone());
+        entry.last_active_at = entry
+            .last_active_at
+            .max(session.last_active_at)
+            .max(post.updated_at);
+    }
+    let mut agents = by_agent
+        .into_iter()
+        .map(|(agent, entry)| AgentSummary {
+            agent,
+            post_count: entry.post_count,
+            session_count: entry.session_ids.len(),
+            last_active_at: entry.last_active_at,
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        right
+            .last_active_at
+            .cmp(&left.last_active_at)
+            .then_with(|| left.agent.cmp(&right.agent))
+    });
+    agents
 }
 
 async fn create_comment(
@@ -1502,10 +1560,19 @@ const VIEWER_HTML: &str = r#"<!doctype html>
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 header { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 20px; border-bottom:1px solid var(--line); background:color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px); }
+.brand { display:flex; align-items:center; gap:9px; min-width:0; }
+.brand-mark { width:22px; height:22px; color:var(--accent); stroke-width:2; flex:none; }
 h1 { margin:0; font-size:18px; letter-spacing:0; }
 button, select, input, textarea { font:inherit; color:inherit; }
 button, select { border:1px solid var(--line); border-radius:6px; background:var(--panel); padding:7px 10px; }
-main { display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; max-width:1100px; margin:0 auto; padding:20px; }
+main { display:grid; grid-template-columns:220px minmax(0, 1fr); gap:18px; max-width:1240px; margin:0 auto; padding:20px; align-items:start; }
+.agent-rail { position:sticky; top:76px; display:grid; gap:8px; min-width:0; }
+.rail-label { color:var(--muted); font-size:12px; text-transform:uppercase; }
+.agent-button { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:6px; width:100%; min-height:42px; text-align:left; }
+.agent-button.on { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.agent-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+.agent-count { color:var(--muted); font-size:12px; }
+.stream { display:grid; gap:16px; min-width:0; }
 .card { border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; }
 .card-head { display:flex; justify-content:space-between; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line); }
 .title { font-weight:700; }
@@ -1519,11 +1586,30 @@ img { max-width:100%; display:block; }
 .comment { display:grid; grid-template-columns:1fr auto; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
 .comment textarea { min-height:44px; resize:vertical; border:1px solid var(--line); border-radius:6px; background:var(--input); padding:8px; }
 .empty { color:var(--muted); padding:40px 20px; text-align:center; }
+@media (max-width: 700px) {
+  header { padding:14px 20px; }
+  main { display:block; padding:20px; }
+  .agent-rail { position:sticky; top:62px; z-index:1; display:flex; gap:8px; overflow-x:auto; margin:0 -20px 16px; padding:10px 20px; border-bottom:1px solid var(--line); background:var(--bg); }
+  .rail-label { display:none; }
+  .agent-button { grid-template-columns:auto auto; min-width:max-content; width:auto; }
+  .stream { gap:16px; }
+  .card-head { align-items:flex-start; }
+  .comment { grid-template-columns:minmax(0, 1fr) auto; }
+  iframe { min-height:220px; }
+}
+@media (max-width: 430px) {
+  header { padding:14px 20px; }
+  main { padding:20px; }
+  .comment textarea { min-width:0; }
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>Glass</h1>
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20" rx="2"></rect></svg>
+    <h1>Glass</h1>
+  </div>
   <div>
     <select id="theme" aria-label="Theme">
       <option value="system">system</option>
@@ -1532,10 +1618,17 @@ img { max-width:100%; display:block; }
     </select>
   </div>
 </header>
-<main id="posts"><div class="empty">No live surfaces yet.</div></main>
+<main>
+  <aside id="agents" class="agent-rail" aria-label="Agents"></aside>
+  <section id="posts" class="stream"><div class="empty">No live surfaces yet.</div></section>
+</main>
 <script>
 const root = document.documentElement;
 const theme = document.getElementById('theme');
+let activeAgent = 'all';
+let currentPosts = [];
+let currentSessions = new Map();
+let currentAgents = [];
 theme.value = localStorage.glassTheme || 'system';
 function applyTheme() {
   localStorage.glassTheme = theme.value;
@@ -1545,6 +1638,8 @@ theme.addEventListener('change', applyTheme);
 applyTheme();
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sessionFor(post) { return currentSessions.get(post.session_id) || {}; }
+function agentFor(post) { return sessionFor(post).agent || 'agent'; }
 function surfaceHtml(post, surface, index) {
   const kind = surface.kind;
   const label = `<div class="surface-label">${esc(kind)} · ${esc(surface.id || index + 1)}</div>`;
@@ -1563,11 +1658,26 @@ async function comment(post) {
   await fetch('/api/comments', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({sessionId: post.session_id, postId: post.id, author:'user', text})});
   box.value = '';
 }
-function render(posts) {
+function renderAgents() {
+  const host = document.getElementById('agents');
+  const total = currentPosts.length;
+  const buttons = [`<button class="agent-button ${activeAgent === 'all' ? 'on' : ''}" data-agent="all"><span class="agent-name">All agents</span><span class="agent-count">${total}</span></button>`]
+    .concat(currentAgents.map(agent => `<button class="agent-button ${activeAgent === agent.agent ? 'on' : ''}" data-agent="${esc(agent.agent)}"><span class="agent-name">${esc(agent.agent)}</span><span class="agent-count">${agent.postCount}</span></button>`));
+  host.innerHTML = `<div class="rail-label">Agents</div>${buttons.join('')}`;
+  for (const button of host.querySelectorAll('button[data-agent]')) {
+    button.onclick = () => {
+      activeAgent = button.dataset.agent || 'all';
+      render();
+    };
+  }
+}
+function render() {
+  renderAgents();
   const host = document.getElementById('posts');
+  const posts = activeAgent === 'all' ? currentPosts : currentPosts.filter(post => agentFor(post) === activeAgent);
   if (!posts.length) { host.innerHTML = '<div class="empty">No live surfaces yet.</div>'; return; }
   host.innerHTML = posts.map(post => `<article class="card">
-    <div class="card-head"><div><div class="title">${esc(post.title)}</div><div class="meta">${esc(post.session_id)} · v${post.version}</div></div><div class="meta">${new Date(post.updated_at * 1000).toLocaleTimeString()}</div></div>
+    <div class="card-head"><div><div class="title">${esc(post.title)}</div><div class="meta">${esc(agentFor(post))} · ${esc(sessionFor(post).title || post.session_id)} · v${post.version}</div></div><div class="meta">${new Date(post.updated_at * 1000).toLocaleTimeString()}</div></div>
     <div class="surfaces">${post.surfaces.map((surface, i) => surfaceHtml(post, surface, i)).join('')}</div>
     <div class="comment"><textarea data-comment-for="${esc(post.id)}" placeholder="Comment to agent"></textarea><button data-post="${esc(post.id)}">Send</button></div>
   </article>`).join('');
@@ -1579,7 +1689,11 @@ function render(posts) {
 async function load() {
   const response = await fetch('/api/posts/recent?limit=40');
   const data = await response.json();
-  render(data.posts || []);
+  currentPosts = data.posts || [];
+  currentSessions = new Map((data.sessions || []).map(session => [session.id, session]));
+  currentAgents = data.agents || [];
+  if (activeAgent !== 'all' && !currentAgents.some(agent => agent.agent === activeAgent)) activeAgent = 'all';
+  render();
 }
 window.addEventListener('message', event => {
   if (!event.data || !event.data.__glass) return;
