@@ -1,0 +1,222 @@
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use glass::{
+    CreateComment, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router,
+};
+use http_body_util::BodyExt;
+use serde_json::json;
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn surface_kinds_match_the_frozen_sideshow_contract() {
+    assert_eq!(
+        SURFACE_KINDS,
+        [
+            SurfaceKind::Html,
+            SurfaceKind::Diff,
+            SurfaceKind::Image,
+            SurfaceKind::Trace,
+            SurfaceKind::Markdown,
+            SurfaceKind::Terminal,
+            SurfaceKind::Mermaid,
+            SurfaceKind::Json,
+            SurfaceKind::Code,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn wait_and_write_piggyback_share_one_exactly_once_feedback_cursor() {
+    let glass = Glass::memory().expect("memory store");
+    let session = glass
+        .create_session(NewSession {
+            agent: "codex-lane".into(),
+            title: "protocol test".into(),
+            cwd: Some("/tmp/glass".into()),
+        })
+        .expect("session");
+    let post = glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "first post".into(),
+            surfaces: vec![
+                Surface::new(SurfaceKind::Markdown, json!({"markdown": "first"})).expect("surface"),
+            ],
+        })
+        .expect("publish")
+        .post;
+
+    glass
+        .create_comment(CreateComment {
+            session_id: session.id.clone(),
+            post_id: post.id.clone(),
+            author: "user".into(),
+            text: "change direction".into(),
+        })
+        .expect("comment");
+
+    let first_wait = glass.wait_for_feedback(&session.id, 0).expect("first wait");
+    assert_eq!(first_wait.len(), 1);
+    assert_eq!(first_wait[0].text, "change direction");
+
+    let second_wait = glass
+        .wait_for_feedback(&session.id, 0)
+        .expect("second wait");
+    assert!(second_wait.is_empty(), "wait must not redeliver feedback");
+
+    glass
+        .create_comment(CreateComment {
+            session_id: session.id.clone(),
+            post_id: post.id.clone(),
+            author: "user".into(),
+            text: "piggyback this".into(),
+        })
+        .expect("second comment");
+
+    let write = glass
+        .update_post(
+            &post.id,
+            PublishPost {
+                session_id: Some(session.id.clone()),
+                session_title: None,
+                agent: None,
+                title: "updated post".into(),
+                surfaces: vec![
+                    Surface::new(SurfaceKind::Markdown, json!({"markdown": "second"}))
+                        .expect("surface"),
+                ],
+            },
+        )
+        .expect("update");
+    assert_eq!(write.user_feedback.len(), 1);
+    assert_eq!(write.user_feedback[0].text, "piggyback this");
+
+    let repeat_write = glass
+        .update_post(
+            &post.id,
+            PublishPost {
+                session_id: Some(session.id.clone()),
+                session_title: None,
+                agent: None,
+                title: "updated post again".into(),
+                surfaces: vec![
+                    Surface::new(SurfaceKind::Markdown, json!({"markdown": "third"}))
+                        .expect("surface"),
+                ],
+            },
+        )
+        .expect("repeat update");
+    assert!(
+        repeat_write.user_feedback.is_empty(),
+        "piggyback must share the same cursor as wait"
+    );
+}
+
+#[tokio::test]
+async fn assets_are_content_addressed_by_sha256() {
+    let glass = Glass::memory().expect("memory store");
+    let first = glass
+        .store_asset("image/png", Some("pixel.png"), b"same bytes")
+        .expect("first asset");
+    let second = glass
+        .store_asset("image/png", Some("again.png"), b"same bytes")
+        .expect("second asset");
+
+    assert_eq!(first.id, second.id);
+    assert_eq!(
+        first.id,
+        "58100dc8fc06562ce3e578231dc948e083520ee49c4b4ee5a5a28bb4b4003feb"
+    );
+    assert_eq!(first.byte_length, 10);
+}
+
+#[tokio::test]
+async fn sandbox_render_route_carries_the_sandbox_in_the_response_header() {
+    let glass = Glass::memory().expect("memory store");
+    let session = glass
+        .create_session(NewSession {
+            agent: "codex-lane".into(),
+            title: "sandbox test".into(),
+            cwd: None,
+        })
+        .expect("session");
+    let post = glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id),
+            session_title: None,
+            agent: None,
+            title: "html surface".into(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Html,
+                    json!({"html": "<button onclick=\"window.sendPrompt('go')\">go</button>"}),
+                )
+                .expect("surface"),
+            ],
+        })
+        .expect("publish")
+        .post;
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/s/{}?part=0", post.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let csp = response
+        .headers()
+        .get("content-security-policy")
+        .expect("csp")
+        .to_str()
+        .expect("csp text");
+    assert!(csp.contains("sandbox"));
+    assert!(!csp.contains("allow-same-origin"));
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("sendPrompt"));
+}
+
+#[tokio::test]
+async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("mcp response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let tools = value["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "publish_post"));
+    assert!(tools.iter().any(|tool| tool["name"] == "wait_for_feedback"));
+
+    let setup = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("setup response");
+    let body = setup.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("/agent-howto"));
+    assert!(text.contains("/mcp"));
+}
