@@ -225,6 +225,77 @@ async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
 }
 
 #[tokio::test]
+async fn recent_posts_summarize_agents_once_from_session_metadata() {
+    let glass = Glass::memory().expect("memory store");
+    let lead_a = glass
+        .create_session(NewSession {
+            agent: "lead".into(),
+            title: "lead daybook command center".into(),
+            cwd: Some("/tmp/daybook-a".into()),
+        })
+        .expect("lead a");
+    let lead_b = glass
+        .create_session(NewSession {
+            agent: "lead".into(),
+            title: "lead daybook command center".into(),
+            cwd: Some("/tmp/daybook-b".into()),
+        })
+        .expect("lead b");
+    let critic = glass
+        .create_session(NewSession {
+            agent: "critic".into(),
+            title: "critic lane".into(),
+            cwd: None,
+        })
+        .expect("critic");
+
+    for session in [&lead_a, &lead_b, &critic] {
+        glass
+            .publish_post(PublishPost {
+                session_id: Some(session.id.clone()),
+                session_title: None,
+                agent: None,
+                title: format!("{} post", session.agent),
+                surfaces: vec![
+                    Surface::new(SurfaceKind::Markdown, json!({"markdown": "proof"}))
+                        .expect("surface"),
+                ],
+            })
+            .expect("publish");
+    }
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/posts/recent?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let agents = value["agents"].as_array().expect("agents");
+    let lead_agents = agents
+        .iter()
+        .filter(|agent| agent["agent"] == "lead")
+        .collect::<Vec<_>>();
+    assert_eq!(lead_agents.len(), 1);
+    assert_eq!(lead_agents[0]["postCount"], 2);
+    assert_eq!(lead_agents[0]["sessionCount"], 2);
+    assert_eq!(
+        value["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .filter(|session| session["agent"] == "lead")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn doctor_verifies_running_service_db_backing_and_feedback_probe() {
     let db_path = temp_db_path("glass-doctor");
     let glass = Glass::open(&db_path).expect("db-backed glass");
