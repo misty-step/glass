@@ -1,10 +1,13 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use glass::{
-    CreateComment, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router,
+    CreateComment, DoctorConfig, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface,
+    SurfaceKind, app_router, run_doctor,
 };
 use http_body_util::BodyExt;
 use serde_json::json;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -219,4 +222,50 @@ async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("/agent-howto"));
     assert!(text.contains("/mcp"));
+}
+
+#[tokio::test]
+async fn doctor_verifies_running_service_db_backing_and_feedback_probe() {
+    let db_path = temp_db_path("glass-doctor");
+    let glass = Glass::open(&db_path).expect("db-backed glass");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app_router(glass))
+            .await
+            .expect("test server");
+    });
+
+    let report = run_doctor(DoctorConfig {
+        url: format!("http://{addr}"),
+        db_path: db_path.clone(),
+        timeout: Duration::from_secs(2),
+    })
+    .await
+    .expect("doctor report");
+
+    assert_eq!(report.db_path, db_path);
+    assert_eq!(report.feedback_text, "glass doctor feedback probe");
+    assert!(report.probe_session_id.starts_with("ses-"));
+    assert!(report.probe_post_id.starts_with("post-"));
+    assert!(report.session_count >= 1);
+
+    let reopened = Glass::open(&db_path).expect("reopen db");
+    let sessions = reopened.list_sessions().expect("sessions");
+    assert!(sessions.iter().any(|session| {
+        session.id == report.probe_session_id && session.agent == "glass-doctor"
+    }));
+
+    server.abort();
+    let _ = std::fs::remove_file(db_path);
+}
+
+fn temp_db_path(prefix: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nonce}.db"))
 }
