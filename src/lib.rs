@@ -1565,10 +1565,20 @@ header { position:sticky; top:0; z-index:2; display:flex; align-items:center; ju
 h1 { margin:0; font-size:18px; letter-spacing:0; }
 button, select, input, textarea { font:inherit; color:inherit; }
 button, select { border:1px solid var(--line); border-radius:6px; background:var(--panel); padding:7px 10px; }
-main { display:grid; grid-template-columns:220px minmax(0, 1fr); gap:18px; max-width:1240px; margin:0 auto; padding:20px; align-items:start; }
+main { display:grid; gap:18px; max-width:1240px; margin:0 auto; padding:20px; }
+.fleet-wall { display:flex; gap:12px; overflow-x:auto; padding-bottom:2px; }
+.fleet-card { flex:0 0 auto; min-width:220px; max-width:260px; display:grid; gap:5px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:11px 13px; text-decoration:none; color:inherit; }
+.fleet-card:hover, .fleet-card.on { border-color:var(--accent); }
+.fleet-card.on { background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.fleet-agent { font-weight:700; font-size:13px; }
+.fleet-title, .fleet-latest { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--muted); }
+.fleet-latest { color:var(--ink); }
+.fleet-time { font-size:11px; color:var(--muted); }
+.fleet-empty { color:var(--muted); font-size:13px; padding:6px 2px; }
+.body-grid { display:grid; grid-template-columns:220px minmax(0, 1fr); gap:18px; align-items:start; }
 .agent-rail { position:sticky; top:76px; display:grid; gap:8px; min-width:0; }
 .rail-label { color:var(--muted); font-size:12px; text-transform:uppercase; }
-.agent-button { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:6px; width:100%; min-height:42px; text-align:left; }
+.agent-button { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:6px; width:100%; min-height:42px; text-align:left; text-decoration:none; }
 .agent-button.on { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
 .agent-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
 .agent-count { color:var(--muted); font-size:12px; }
@@ -1588,7 +1598,9 @@ img { max-width:100%; display:block; }
 .empty { color:var(--muted); padding:40px 20px; text-align:center; }
 @media (max-width: 700px) {
   header { padding:14px 20px; }
-  main { display:block; padding:20px; }
+  main { padding:20px; }
+  .fleet-card { min-width:190px; max-width:220px; }
+  .body-grid { display:block; }
   .agent-rail { position:sticky; top:62px; z-index:1; display:flex; gap:8px; overflow-x:auto; margin:0 -20px 16px; padding:10px 20px; border-bottom:1px solid var(--line); background:var(--bg); }
   .rail-label { display:none; }
   .agent-button { grid-template-columns:auto auto; min-width:max-content; width:auto; }
@@ -1619,8 +1631,11 @@ img { max-width:100%; display:block; }
   </div>
 </header>
 <main>
-  <aside id="agents" class="agent-rail" aria-label="Agents"></aside>
-  <section id="posts" class="stream"><div class="empty">No live surfaces yet.</div></section>
+  <section id="fleet" class="fleet-wall" aria-label="Live sessions"></section>
+  <div class="body-grid">
+    <aside id="agents" class="agent-rail" aria-label="Agents"></aside>
+    <section id="posts" class="stream"><div class="empty">No live surfaces yet.</div></section>
+  </div>
 </main>
 <script>
 const root = document.documentElement;
@@ -1629,6 +1644,8 @@ let activeAgent = 'all';
 let currentPosts = [];
 let currentSessions = new Map();
 let currentAgents = [];
+const sessionMatch = window.location.pathname.match(/^\/session\/([^/]+)/);
+const viewSession = sessionMatch ? decodeURIComponent(sessionMatch[1]) : null;
 theme.value = localStorage.glassTheme || 'system';
 function applyTheme() {
   localStorage.glassTheme = theme.value;
@@ -1658,8 +1675,33 @@ async function comment(post) {
   await fetch('/api/comments', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({sessionId: post.session_id, postId: post.id, author:'user', text})});
   box.value = '';
 }
+function renderFleet() {
+  const host = document.getElementById('fleet');
+  const latestBySession = new Map();
+  for (const post of currentPosts) {
+    if (!latestBySession.has(post.session_id)) latestBySession.set(post.session_id, post);
+  }
+  const cards = [...currentSessions.values()]
+    .filter(session => latestBySession.has(session.id))
+    .sort((a, b) => b.last_active_at - a.last_active_at)
+    .map(session => {
+      const post = latestBySession.get(session.id);
+      return `<a class="fleet-card ${session.id === viewSession ? 'on' : ''}" href="/session/${encodeURIComponent(session.id)}">
+        <div class="fleet-agent">${esc(session.agent)}</div>
+        <div class="fleet-title">${esc(session.title)}</div>
+        <div class="fleet-latest">${esc(post.title)}</div>
+        <div class="fleet-time">${new Date(post.updated_at * 1000).toLocaleTimeString()}</div>
+      </a>`;
+    });
+  host.innerHTML = cards.length ? cards.join('') : '<div class="fleet-empty">No live sessions yet.</div>';
+}
 function renderAgents() {
   const host = document.getElementById('agents');
+  if (viewSession) {
+    const session = currentSessions.get(viewSession) || {};
+    host.innerHTML = `<a class="agent-button" href="/"><span class="agent-name">&larr; All sessions</span></a><div class="rail-label">Session</div><div class="agent-button on"><span class="agent-name">${esc(session.agent || 'agent')}</span></div><div class="fleet-title">${esc(session.title || viewSession)}</div>`;
+    return;
+  }
   const total = currentPosts.length;
   const buttons = [`<button class="agent-button ${activeAgent === 'all' ? 'on' : ''}" data-agent="all"><span class="agent-name">All agents</span><span class="agent-count">${total}</span></button>`]
     .concat(currentAgents.map(agent => `<button class="agent-button ${activeAgent === agent.agent ? 'on' : ''}" data-agent="${esc(agent.agent)}"><span class="agent-name">${esc(agent.agent)}</span><span class="agent-count">${agent.postCount}</span></button>`));
@@ -1672,9 +1714,12 @@ function renderAgents() {
   }
 }
 function render() {
+  renderFleet();
   renderAgents();
   const host = document.getElementById('posts');
-  const posts = activeAgent === 'all' ? currentPosts : currentPosts.filter(post => agentFor(post) === activeAgent);
+  const posts = viewSession
+    ? currentPosts.filter(post => post.session_id === viewSession)
+    : (activeAgent === 'all' ? currentPosts : currentPosts.filter(post => agentFor(post) === activeAgent));
   if (!posts.length) { host.innerHTML = '<div class="empty">No live surfaces yet.</div>'; return; }
   host.innerHTML = posts.map(post => `<article class="card">
     <div class="card-head"><div><div class="title">${esc(post.title)}</div><div class="meta">${esc(agentFor(post))} · ${esc(sessionFor(post).title || post.session_id)} · v${post.version}</div></div><div class="meta">${new Date(post.updated_at * 1000).toLocaleTimeString()}</div></div>
