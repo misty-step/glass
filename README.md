@@ -18,7 +18,9 @@ the runtime with a native Rust service.
 - Feedback comments delivered through one server-side `agent_seq` cursor shared
   by `GET /api/comments?...` and write-response `userFeedback` piggybacking.
 - A vanilla viewer with light, dark, and system theme modes.
-- Curl-first setup docs plus a small stateless MCP-compatible HTTP endpoint.
+- `glass publish` / `glass feedback` CLI subcommands wrapping the same core
+  the MCP tools call, plus curl-first setup docs and a small stateless
+  MCP-compatible HTTP endpoint for consumers without CLI access.
 
 ## Quickstart
 
@@ -27,6 +29,22 @@ cargo run -- serve --bind 127.0.0.1:9041 --db data/glass.db
 ```
 
 Open `http://127.0.0.1:9041`.
+
+Agents with a local `glass` binary should publish and drain feedback through
+the CLI rather than hand-rolled curl — see [`SKILL.md`](SKILL.md):
+
+```sh
+glass publish --db data/glass.db --title "Protocol proof" \
+  --agent codex-glass-901 --session-title "glass-901 native build" \
+  --markdown "Glass is receiving typed surfaces." \
+  --terminal "cargo test --workspace
+5 passed"
+
+glass feedback --db data/glass.db --session <session_id> --wait 1
+```
+
+The curl examples below remain the documented protocol-level contract for
+remote or MCP-only consumers without CLI access.
 
 Publish a codex lane surface:
 
@@ -119,6 +137,9 @@ curl -s http://127.0.0.1:9041/agent-howto
 
 MCP-capable clients can use the stateless HTTP endpoint at `/mcp`. The MVP tool
 surface includes `publish_post`, `wait_for_feedback`, and `reply_to_user`.
+Agents with a local `glass` binary have a shipped skill at
+[`SKILL.md`](SKILL.md) documenting the `publish`/`feedback`/`doctor` contract,
+matching the pattern used by misty-canary/misty-powder/misty-bitterblossom.
 
 ## Tailnet Posture
 

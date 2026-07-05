@@ -1406,6 +1406,11 @@ const AGENT_HOWTO: &str = r#"# Glass agent how-to
 Publish small ordered typed surfaces instead of hand-built status pages. One
 agent conversation maps to one session; one artifact maps to one versioned post.
 
+Agents with a local `glass` binary should prefer `glass publish` / `glass
+feedback` over hand-rolled curl against these HTTP routes directly — see
+SKILL.md. The curl examples below remain the contract for remote or
+MCP-only consumers without CLI access.
+
 Surface kinds: html, markdown, mermaid, diff, terminal, json, code, image,
 trace. HTML, markdown, mermaid, diff, terminal, and code render through
 sandboxed /s/:post_id?part=N documents. JSON, trace, and images are rendered as
