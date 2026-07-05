@@ -53,7 +53,7 @@ async fn doctor(args: Vec<String>) -> Result<()> {
     })
     .await?;
     println!(
-        "glass doctor ok\nurl={}\ndb={}\nsessions={}\nprobe_session={}\nprobe_post={}\nfeedback=delivered-once",
+        "glass doctor ok\nurl={}\ndb={}\nsessions={}\nprobe_session={}\nprobe_post={}\nfeedback=delivered-once\nprobe=self-cleaned",
         report.url,
         report.db_path.display(),
         report.session_count,

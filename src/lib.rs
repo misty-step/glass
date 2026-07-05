@@ -345,6 +345,14 @@ impl Glass {
         store.create_comment(input)
     }
 
+    /// Removes a diagnostic probe session and everything under it (posts,
+    /// comments). Used only by the doctor to self-clean after it has proven
+    /// the round trip; not exposed over HTTP.
+    pub fn delete_probe_session(&self, session_id: &str) -> Result<()> {
+        let mut store = self.lock()?;
+        store.delete_probe_session(session_id)
+    }
+
     pub fn wait_for_feedback(&self, session_id: &str, wait_seconds: u64) -> Result<Vec<Comment>> {
         let deadline = now_seconds() + wait_seconds as i64;
         loop {
@@ -746,6 +754,16 @@ impl Store {
         )?;
         Ok(())
     }
+
+    fn delete_probe_session(&mut self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM comments WHERE session_id = ?1", [session_id])?;
+        self.conn
+            .execute("DELETE FROM posts WHERE session_id = ?1", [session_id])?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
+        Ok(())
+    }
 }
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
@@ -929,12 +947,34 @@ async fn recent_posts(
 ) -> Result<Json<Value>, ApiError> {
     let posts = glass.list_recent_posts(query.limit.unwrap_or(30))?;
     let sessions = glass.list_sessions()?;
+    let session_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let posts = posts
+        .into_iter()
+        .filter(|post| {
+            session_by_id
+                .get(post.session_id.as_str())
+                .is_none_or(|session| !is_diagnostic_agent(&session.agent))
+        })
+        .collect::<Vec<_>>();
+    let sessions = sessions
+        .into_iter()
+        .filter(|session| !is_diagnostic_agent(&session.agent))
+        .collect::<Vec<_>>();
     let agents = summarize_agents(&posts, &sessions);
     Ok(Json(json!({
         "posts": posts,
         "sessions": sessions,
         "agents": agents,
     })))
+}
+
+/// Diagnostic agents (the doctor's own probes) prove the live round trip but
+/// are not operator content; the operator-facing stream excludes them.
+fn is_diagnostic_agent(agent: &str) -> bool {
+    agent == "glass-doctor"
 }
 
 fn summarize_agents(posts: &[Post], sessions: &[Session]) -> Vec<AgentSummary> {
@@ -1492,6 +1532,13 @@ pub async fn run_doctor(config: DoctorConfig) -> Result<DoctorReport> {
             config.db_path.display()
         );
     }
+
+    // The round trip is proven above through a fresh connection reopen; the
+    // probe is diagnostic exhaust, not operator content, so it self-cleans
+    // rather than accumulating in the stage on every doctor run.
+    reopened
+        .delete_probe_session(&publish.post.session_id)
+        .with_context(|| format!("clean up doctor probe session {}", publish.post.session_id))?;
 
     Ok(DoctorReport {
         url: base_url,

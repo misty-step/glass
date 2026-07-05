@@ -323,14 +323,109 @@ async fn doctor_verifies_running_service_db_backing_and_feedback_probe() {
     assert!(report.probe_post_id.starts_with("post-"));
     assert!(report.session_count >= 1);
 
+    // The doctor proves the round trip through a fresh reopen internally
+    // (it would have bailed above had persistence failed), then self-cleans
+    // its probe so diagnostic exhaust doesn't linger in the stage.
     let reopened = Glass::open(&db_path).expect("reopen db");
     let sessions = reopened.list_sessions().expect("sessions");
-    assert!(sessions.iter().any(|session| {
-        session.id == report.probe_session_id && session.agent == "glass-doctor"
-    }));
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session.id == report.probe_session_id),
+        "doctor probe session must self-clean after verifying the round trip"
+    );
+    let posts = reopened
+        .list_recent_posts(50)
+        .expect("posts after doctor run");
+    assert!(
+        !posts.iter().any(|post| post.id == report.probe_post_id),
+        "doctor probe post must self-clean after verifying the round trip"
+    );
 
     server.abort();
     let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn recent_posts_excludes_glass_doctor_probes_from_the_operator_stream() {
+    let glass = Glass::memory().expect("memory store");
+    let operator_session = glass
+        .create_session(NewSession {
+            agent: "codex-lane".into(),
+            title: "real work".into(),
+            cwd: Some("/tmp/glass-operator".into()),
+        })
+        .expect("operator session");
+    glass
+        .publish_post(PublishPost {
+            session_id: Some(operator_session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "operator content".into(),
+            surfaces: vec![
+                Surface::new(SurfaceKind::Markdown, json!({"markdown": "real"})).expect("surface"),
+            ],
+        })
+        .expect("publish operator post");
+
+    let probe_session = glass
+        .create_session(NewSession {
+            agent: "glass-doctor".into(),
+            title: "glass doctor probe".into(),
+            cwd: None,
+        })
+        .expect("probe session");
+    glass
+        .publish_post(PublishPost {
+            session_id: Some(probe_session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "Glass doctor probe".into(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Markdown,
+                    json!({"markdown": "Glass doctor disposable probe."}),
+                )
+                .expect("surface"),
+            ],
+        })
+        .expect("publish probe post");
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/posts/recent?limit=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let posts = value["posts"].as_array().expect("posts");
+    assert!(posts.iter().any(|post| post["title"] == "operator content"));
+    assert!(
+        !posts
+            .iter()
+            .any(|post| post["session_id"] == probe_session.id),
+        "doctor probe posts must not appear in the operator stream"
+    );
+
+    let sessions = value["sessions"].as_array().expect("sessions");
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session["id"] == probe_session.id),
+        "doctor probe sessions must not appear in the operator stream"
+    );
+
+    let agents = value["agents"].as_array().expect("agents");
+    assert!(
+        !agents.iter().any(|agent| agent["agent"] == "glass-doctor"),
+        "glass-doctor must not appear as an agent in the operator stream"
+    );
 }
 
 fn temp_db_path(prefix: &str) -> PathBuf {
