@@ -524,6 +524,27 @@ async fn aesthetic_css_is_served_for_the_shell_and_sandboxed_surfaces() {
     assert!(css.contains("--ae-accent"));
 }
 
+#[tokio::test]
+async fn viewer_carries_the_cross_repo_sanctum_home_affordance() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        html.contains("data-sanctum-home"),
+        "viewer must carry the data-sanctum-home marker other Sanctum tooling scans for"
+    );
+    assert!(
+        html.contains(r#"href="https://bastion.tail5f5eb4.ts.net/""#),
+        "the affordance must point at the actual portal root, not a relative path \
+         (bastion-917 audit: unlike bastion's own same-origin injection, Glass is a \
+         cross-origin destination)"
+    );
+}
+
 fn temp_db_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

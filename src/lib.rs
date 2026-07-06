@@ -1464,6 +1464,7 @@ try {
       <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
       <span class="ae-name">Glass</span>
     </a>
+    <a data-sanctum-home href="https://bastion.tail5f5eb4.ts.net/" aria-label="Back to Sanctum" title="Back to Sanctum"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"></path><path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg> Sanctum</a>
     <p class="ae-h">Agents</p>
     <a href="/" id="rail-all">All agents</a>
     <div id="rail-agents"></div>
