@@ -1,8 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use glass::{
-    CreateComment, DoctorConfig, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface,
-    SurfaceKind, app_router, run_doctor,
+    DoctorConfig, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router,
+    run_doctor,
 };
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn surface_kinds_match_the_frozen_sideshow_contract() {
+async fn surface_kinds_match_the_frozen_sideshow_contract_plus_metric() {
     assert_eq!(
         SURFACE_KINDS,
         [
@@ -24,97 +24,47 @@ async fn surface_kinds_match_the_frozen_sideshow_contract() {
             SurfaceKind::Mermaid,
             SurfaceKind::Json,
             SurfaceKind::Code,
+            SurfaceKind::Metric,
         ]
     );
 }
 
 #[tokio::test]
-async fn wait_and_write_piggyback_share_one_exactly_once_feedback_cursor() {
+async fn publish_outcome_carries_no_comment_or_feedback_surface() {
     let glass = Glass::memory().expect("memory store");
-    let session = glass
-        .create_session(NewSession {
-            agent: "codex-lane".into(),
-            title: "protocol test".into(),
-            cwd: Some("/tmp/glass".into()),
-        })
-        .expect("session");
-    let post = glass
+    let outcome = glass
         .publish_post(PublishPost {
-            session_id: Some(session.id.clone()),
+            session_id: None,
             session_title: None,
             agent: None,
-            title: "first post".into(),
+            title: "one-way post".into(),
             surfaces: vec![
-                Surface::new(SurfaceKind::Markdown, json!({"markdown": "first"})).expect("surface"),
+                Surface::new(SurfaceKind::Markdown, json!({"markdown": "one-way"}))
+                    .expect("surface"),
             ],
         })
-        .expect("publish")
-        .post;
-
-    glass
-        .create_comment(CreateComment {
-            session_id: session.id.clone(),
-            post_id: post.id.clone(),
-            author: "user".into(),
-            text: "change direction".into(),
-        })
-        .expect("comment");
-
-    let first_wait = glass.wait_for_feedback(&session.id, 0).expect("first wait");
-    assert_eq!(first_wait.len(), 1);
-    assert_eq!(first_wait[0].text, "change direction");
-
-    let second_wait = glass
-        .wait_for_feedback(&session.id, 0)
-        .expect("second wait");
-    assert!(second_wait.is_empty(), "wait must not redeliver feedback");
-
-    glass
-        .create_comment(CreateComment {
-            session_id: session.id.clone(),
-            post_id: post.id.clone(),
-            author: "user".into(),
-            text: "piggyback this".into(),
-        })
-        .expect("second comment");
-
-    let write = glass
-        .update_post(
-            &post.id,
-            PublishPost {
-                session_id: Some(session.id.clone()),
-                session_title: None,
-                agent: None,
-                title: "updated post".into(),
-                surfaces: vec![
-                    Surface::new(SurfaceKind::Markdown, json!({"markdown": "second"}))
-                        .expect("surface"),
-                ],
-            },
-        )
-        .expect("update");
-    assert_eq!(write.user_feedback.len(), 1);
-    assert_eq!(write.user_feedback[0].text, "piggyback this");
-
-    let repeat_write = glass
-        .update_post(
-            &post.id,
-            PublishPost {
-                session_id: Some(session.id.clone()),
-                session_title: None,
-                agent: None,
-                title: "updated post again".into(),
-                surfaces: vec![
-                    Surface::new(SurfaceKind::Markdown, json!({"markdown": "third"}))
-                        .expect("surface"),
-                ],
-            },
-        )
-        .expect("repeat update");
+        .expect("publish");
+    let value = serde_json::to_value(&outcome).expect("serialize outcome");
     assert!(
-        repeat_write.user_feedback.is_empty(),
-        "piggyback must share the same cursor as wait"
+        value.get("userFeedback").is_none() && value.get("user_feedback").is_none(),
+        "glass-912 deleted the feedback surface: {value}"
     );
+}
+
+#[tokio::test]
+async fn metric_surface_requires_label_and_value() {
+    let missing_value = Surface::new(SurfaceKind::Metric, json!({"label": "tests"}));
+    assert!(missing_value.is_err(), "metric without value must reject");
+
+    let missing_label = Surface::new(SurfaceKind::Metric, json!({"value": "42 passed"}));
+    assert!(missing_label.is_err(), "metric without label must reject");
+
+    let metric = Surface::new(
+        SurfaceKind::Metric,
+        json!({"label": "tests", "value": "42 passed"}),
+    )
+    .expect("valid metric surface");
+    assert_eq!(metric.kind, SurfaceKind::Metric);
 }
 
 #[tokio::test]
@@ -207,7 +157,10 @@ async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let tools = value["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "publish_post"));
-    assert!(tools.iter().any(|tool| tool["name"] == "wait_for_feedback"));
+    assert!(
+        !tools.iter().any(|tool| tool["name"] == "wait_for_feedback"),
+        "glass-912 deleted the feedback tool: {tools:?}"
+    );
 
     let setup = app_router(Glass::memory().expect("memory store"))
         .oneshot(
@@ -296,7 +249,7 @@ async fn recent_posts_summarize_agents_once_from_session_metadata() {
 }
 
 #[tokio::test]
-async fn doctor_verifies_running_service_db_backing_and_feedback_probe() {
+async fn doctor_verifies_running_service_db_backing_and_self_cleans() {
     let db_path = temp_db_path("glass-doctor");
     let glass = Glass::open(&db_path).expect("db-backed glass");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -318,7 +271,6 @@ async fn doctor_verifies_running_service_db_backing_and_feedback_probe() {
     .expect("doctor report");
 
     assert_eq!(report.db_path, db_path);
-    assert_eq!(report.feedback_text, "glass doctor feedback probe");
     assert!(report.probe_session_id.starts_with("ses-"));
     assert!(report.probe_post_id.starts_with("post-"));
     assert!(report.session_count >= 1);
@@ -426,6 +378,150 @@ async fn recent_posts_excludes_glass_doctor_probes_from_the_operator_stream() {
         !agents.iter().any(|agent| agent["agent"] == "glass-doctor"),
         "glass-doctor must not appear as an agent in the operator stream"
     );
+}
+
+#[tokio::test]
+async fn dead_sessions_are_flagged_live_false_but_keep_their_posts() {
+    let db_path = temp_db_path("glass-dead");
+    let glass = Glass::open(&db_path).expect("db-backed glass");
+    let session = glass
+        .create_session(NewSession {
+            agent: "codex-lane".into(),
+            title: "long quiet lane".into(),
+            cwd: None,
+        })
+        .expect("session");
+    glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "last known status".into(),
+            surfaces: vec![
+                Surface::new(SurfaceKind::Markdown, json!({"markdown": "quiet"})).expect("surface"),
+            ],
+        })
+        .expect("publish");
+
+    // Backdate the session well past LIVE_WINDOW_SECONDS. There is no public
+    // setter for this (by design), so open a second connection to the same
+    // file, exactly as a second concurrent agent process would.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("second connection");
+        conn.execute(
+            "UPDATE sessions SET last_active_at = last_active_at - 3600 WHERE id = ?1",
+            [&session.id],
+        )
+        .expect("backdate session");
+    }
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/posts/recent?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let sessions = value["sessions"].as_array().expect("sessions");
+    let backdated = sessions
+        .iter()
+        .find(|entry| entry["id"] == session.id)
+        .expect("backdated session present");
+    assert_eq!(
+        backdated["isLive"], false,
+        "a session quiet for over LIVE_WINDOW_SECONDS must report isLive=false: {backdated}"
+    );
+
+    // Dead sessions demote out of the primary rail client-side; the API
+    // keeps serving their full post history rather than dropping it.
+    let posts = value["posts"].as_array().expect("posts");
+    assert!(posts.iter().any(|post| post["session_id"] == session.id));
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn recent_posts_agent_filter_scopes_posts_but_not_the_roster() {
+    let glass = Glass::memory().expect("memory store");
+    let alpha = glass
+        .create_session(NewSession {
+            agent: "alpha".into(),
+            title: "alpha lane".into(),
+            cwd: None,
+        })
+        .expect("alpha session");
+    let beta = glass
+        .create_session(NewSession {
+            agent: "beta".into(),
+            title: "beta lane".into(),
+            cwd: None,
+        })
+        .expect("beta session");
+    for (session, text) in [(&alpha, "alpha status"), (&beta, "beta status")] {
+        glass
+            .publish_post(PublishPost {
+                session_id: Some(session.id.clone()),
+                session_title: None,
+                agent: None,
+                title: text.to_string(),
+                surfaces: vec![
+                    Surface::new(SurfaceKind::Markdown, json!({"markdown": text}))
+                        .expect("surface"),
+                ],
+            })
+            .expect("publish");
+    }
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/posts/recent?agent=alpha")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let posts = value["posts"].as_array().expect("posts");
+    assert_eq!(posts.len(), 1, "agent filter must scope posts: {posts:?}");
+    assert_eq!(posts[0]["title"], "alpha status");
+
+    // The rail needs the full roster regardless of which agent's feed is
+    // open, so a viewer can navigate to any other agent from any view.
+    let agents = value["agents"].as_array().expect("agents");
+    assert!(agents.iter().any(|agent| agent["agent"] == "alpha"));
+    assert!(agents.iter().any(|agent| agent["agent"] == "beta"));
+}
+
+#[tokio::test]
+async fn aesthetic_css_is_served_for_the_shell_and_sandboxed_surfaces() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/aesthetic.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .expect("content-type")
+        .to_str()
+        .expect("content-type text");
+    assert!(content_type.contains("text/css"));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let css = String::from_utf8(body.to_vec()).unwrap();
+    assert!(css.contains("--ae-accent"));
 }
 
 fn temp_db_path(prefix: &str) -> PathBuf {

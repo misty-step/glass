@@ -19,7 +19,6 @@ async fn main() -> Result<()> {
         }
         Some("doctor") => doctor(args.collect()).await,
         Some("publish") => publish(args.collect()).await,
-        Some("feedback") => feedback(args.collect()).await,
         Some("help" | "--help" | "-h") => {
             print_help();
             Ok(())
@@ -58,7 +57,7 @@ async fn doctor(args: Vec<String>) -> Result<()> {
     })
     .await?;
     println!(
-        "glass doctor ok\nurl={}\ndb={}\nsessions={}\nprobe_session={}\nprobe_post={}\nfeedback=delivered-once\nprobe=self-cleaned",
+        "glass doctor ok\nurl={}\ndb={}\nsessions={}\nprobe_session={}\nprobe_post={}\nprobe=self-cleaned",
         report.url,
         report.db_path.display(),
         report.session_count,
@@ -183,57 +182,15 @@ async fn publish(args: Vec<String>) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     } else {
         println!(
-            "glass publish ok\npost_id={}\nsession_id={}\nurl={}\nfeedback_pending={}",
-            outcome.post.id,
-            outcome.post.session_id,
-            outcome.url,
-            outcome.user_feedback.len()
+            "glass publish ok\npost_id={}\nsession_id={}\nurl={}",
+            outcome.post.id, outcome.post.session_id, outcome.url
         );
-    }
-    Ok(())
-}
-
-async fn feedback(args: Vec<String>) -> Result<()> {
-    let mut db = std::env::var("GLASS_DB").unwrap_or_else(|_| "data/glass.db".into());
-    let mut session_id: Option<String> = None;
-    let mut wait_seconds = 0_u64;
-    let mut json_output = false;
-
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--db" => db = iter.next().context("--db requires a path")?,
-            "--session" => session_id = Some(iter.next().context("--session requires an id")?),
-            "--wait" => {
-                wait_seconds = iter
-                    .next()
-                    .context("--wait requires seconds")?
-                    .parse()
-                    .context("parse --wait seconds")?;
-            }
-            "--json" => json_output = true,
-            other => bail!("unknown feedback argument: {other}"),
-        }
-    }
-
-    let session_id = session_id.context("--session is required")?;
-    let glass = Glass::open(&db)?;
-    let comments = glass.wait_for_feedback(&session_id, wait_seconds)?;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&comments)?);
-    } else if comments.is_empty() {
-        println!("glass feedback: no new comments for session {session_id}");
-    } else {
-        for comment in &comments {
-            println!("[{}] {}: {}", comment.post_id, comment.author, comment.text);
-        }
     }
     Ok(())
 }
 
 fn print_help() {
     eprintln!(
-        "glass commands:\n  glass serve [--bind 127.0.0.1:9041] [--db data/glass.db]\n  glass doctor [--url http://127.0.0.1:9041] [--db data/glass.db] [--timeout 5]\n  glass surface-kinds\n  glass publish --title <title> [--db data/glass.db] [--session <id>] [--session-title <title>] [--agent <name>] [--markdown <text>] [--markdown-file <path>] [--terminal <text>] [--terminal-file <path>] [--surfaces-json <path>|-] [--json]\n  glass feedback --session <id> [--db data/glass.db] [--wait <seconds>] [--json]"
+        "glass commands:\n  glass serve [--bind 127.0.0.1:9041] [--db data/glass.db]\n  glass doctor [--url http://127.0.0.1:9041] [--db data/glass.db] [--timeout 5]\n  glass surface-kinds\n  glass publish --title <title> [--db data/glass.db] [--session <id>] [--session-title <title>] [--agent <name>] [--markdown <text>] [--markdown-file <path>] [--terminal <text>] [--terminal-file <path>] [--surfaces-json <path>|-] [--json]"
     );
 }

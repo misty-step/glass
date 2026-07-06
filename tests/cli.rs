@@ -134,129 +134,29 @@ fn publish_reads_surfaces_json_from_stdin() {
 }
 
 #[test]
-fn feedback_drains_real_user_comments_exactly_once() {
-    let db = temp_db("feedback");
+fn publish_outcome_carries_no_feedback_surface() {
+    let db = temp_db("one-way");
 
-    // publish a post to create a session, capturing its id.
-    let publish_output = Command::new(glass_bin())
+    let output = Command::new(glass_bin())
         .args([
             "publish",
             "--db",
             db.to_str().unwrap(),
             "--title",
-            "feedback test post",
+            "one-way test post",
             "--markdown",
-            "waiting for feedback",
+            "glass is one-way",
             "--json",
         ])
         .output()
         .expect("run glass publish");
-    assert!(publish_output.status.success());
-    let outcome: Value = serde_json::from_slice(&publish_output.stdout).expect("parse publish");
-    let session_id = outcome["post"]["session_id"].as_str().unwrap().to_owned();
-    let post_id = outcome["post"]["id"].as_str().unwrap().to_owned();
 
-    // no feedback yet.
-    let empty = Command::new(glass_bin())
-        .args([
-            "feedback",
-            "--db",
-            db.to_str().unwrap(),
-            "--session",
-            &session_id,
-        ])
-        .output()
-        .expect("run glass feedback");
-    assert!(empty.status.success());
-    assert!(String::from_utf8_lossy(&empty.stdout).contains("no new comments"));
-
-    // insert real user feedback directly through the same core the CLI wraps,
-    // using a second publish call's session to reuse glass's own comment path
-    // is awkward from the CLI alone (no comment subcommand exists), so drive
-    // the HTTP API the same way a real user's browser would.
-    let bind = "127.0.0.1:9241";
-    let mut server = Command::new(glass_bin())
-        .args(["serve", "--db", db.to_str().unwrap(), "--bind", bind])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn glass serve");
-    std::thread::sleep(std::time::Duration::from_millis(400));
-
-    let body = serde_json::json!({
-        "session_id": session_id,
-        "post_id": post_id,
-        "author": "user",
-        "text": "ship it",
-    })
-    .to_string();
-    let curl = Command::new("curl")
-        .args([
-            "-fsS",
-            "-X",
-            "POST",
-            &format!("http://{bind}/api/comments"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-        ])
-        .output()
-        .expect("post comment via curl");
+    assert!(output.status.success());
+    let outcome: Value = serde_json::from_slice(&output.stdout).expect("parse publish JSON");
     assert!(
-        curl.status.success(),
-        "curl stderr: {}",
-        String::from_utf8_lossy(&curl.stderr)
+        outcome.get("userFeedback").is_none() && outcome.get("user_feedback").is_none(),
+        "publish outcome must not carry a feedback field: {outcome}"
     );
-    let _ = server.kill();
-    let _ = server.wait();
-
-    // now the CLI should drain exactly this one comment.
-    let drained = Command::new(glass_bin())
-        .args([
-            "feedback",
-            "--db",
-            db.to_str().unwrap(),
-            "--session",
-            &session_id,
-            "--json",
-        ])
-        .output()
-        .expect("run glass feedback");
-    assert!(drained.status.success());
-    let comments: Value = serde_json::from_slice(&drained.stdout).expect("parse feedback JSON");
-    assert_eq!(comments.as_array().unwrap().len(), 1);
-    assert_eq!(comments[0]["text"], "ship it");
-    assert_eq!(comments[0]["author"], "user");
-
-    // exactly-once: draining again returns nothing new.
-    let drained_again = Command::new(glass_bin())
-        .args([
-            "feedback",
-            "--db",
-            db.to_str().unwrap(),
-            "--session",
-            &session_id,
-        ])
-        .output()
-        .expect("run glass feedback");
-    assert!(drained_again.status.success());
-    assert!(String::from_utf8_lossy(&drained_again.stdout).contains("no new comments"));
-
-    let _ = std::fs::remove_file(&db);
-}
-
-#[test]
-fn feedback_without_session_fails_loudly() {
-    let db = temp_db("feedback-no-session");
-
-    let output = Command::new(glass_bin())
-        .args(["feedback", "--db", db.to_str().unwrap()])
-        .output()
-        .expect("run glass feedback");
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--session is required"));
 
     let _ = std::fs::remove_file(&db);
 }
