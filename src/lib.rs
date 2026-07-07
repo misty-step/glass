@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 mod backlog_report;
 mod needs_you;
 mod rep1;
+mod review_report;
 mod window_report;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -773,6 +774,7 @@ pub fn app_router(glass: Glass) -> Router {
         )
         .route("/rep1", get(rep1::rep1_shell))
         .route("/api/rep1/{window}", get(rep1::rep1_report))
+        .route("/review/sample", get(review_report::review_sample_shell))
         .route("/backlog/{repo}", get(backlog_report::backlog_shell))
         .route("/api/backlog/{repo}", get(backlog_report::backlog_report))
         .route("/needs-you", get(needs_you::needs_you_shell))

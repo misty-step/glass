@@ -724,6 +724,35 @@ async fn backlog_report_streams_a_skeleton_then_a_named_config_error_when_powder
 }
 
 #[tokio::test]
+async fn review_sample_shell_renders_the_three_cited_context_layers() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/review/sample")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(html.contains("Narrated review"));
+    assert!(html.contains("Change context"));
+    assert!(html.contains("src/lib.rs:777"));
+    assert!(html.contains("Powder ticket"));
+    assert!(html.contains("glass-902"));
+    assert!(html.contains("VISION.md#live-stage"));
+    assert!(html.contains(r#"data-glance-component="disclosure""#));
+    assert!(html.contains("Raw diff"));
+    assert!(
+        html.contains(r#"data-reviewer-sanity="pass""#),
+        "the operator-facing sample must show the reviewer sanity check passed"
+    );
+}
+
+#[tokio::test]
 async fn needs_you_shell_serves_the_rail_page() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
