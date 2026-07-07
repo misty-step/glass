@@ -69,17 +69,21 @@
   gap: var(--ae-space-5);
   max-width: 52%;
   background: var(--ae-wash);
-  background: color-mix(in srgb, var(--ae-surface) 82%, transparent);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--ae-surface) 62%, transparent);
+  backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(6px);
   border: 1px solid var(--ae-line);
   padding: var(--ae-space-6);
 }
 
 .msk-hero-title {
-  font-weight: var(--ae-w-black);
+  font-weight: var(--ae-w-bold);
   color: var(--ae-ink);
   text-wrap: balance;
+  font-size: clamp(1.7rem, 2.8vw, 2.6rem);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  max-width: 24ch;
 }
 
 @media (max-width: 780px) {
