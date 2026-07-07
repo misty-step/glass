@@ -12,7 +12,20 @@ inventing a second design system.
 
 ## Pitch One-Liner
 
-`Glass helps operators watch every live agent lane without opening logs, and reply to any agent without breaking its flow.`
+`Watch your fleet work.`
+
+## Locked Homepage
+
+- Lock: operator lock-in 2026-07-07, `misty-step-936`.
+- Layout: Split.
+- Homepage H1: `Watch your fleet work.`
+- Hero image: `site/assets/hero.jpg`, copied from the production
+  `glass-hero.jpg` asset generated with `gpt-image-1` in the Misty Step fresco
+  language.
+- Hero image opacity: `0.85`.
+- Homepage structure: one viewport only — header, left-aligned hero H1,
+  `Get started` CTA, and footer. Existing feature rows and screenshots live on
+  `features.html`.
 
 ## Lucide Mark
 
@@ -47,10 +60,12 @@ running stage:
 ## Footer Links
 
 - Misty Step: `https://mistystep.io`
-- GitHub: `https://github.com/misty-step/glass` — omitted for now, the repo is
-  private; add this link back once the operator decides to make it public.
-- Weave: omitted; Glass is a Misty Step fleet product, not a Weave-family
-  product surface.
+- GitHub: `https://github.com/misty-step/glass`
+
+Footer contract: the mode toggle sits on the left. The right side reads
+`a Misty Step project`, with `Misty Step` linked to `https://mistystep.io`,
+followed by the GitHub glyph linked to the public repo. No bare URL text, no
+email, no copyright line, and no Weave links.
 
 ## Release Notes Rule
 
