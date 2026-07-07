@@ -10,8 +10,9 @@ the runtime with a native Rust service.
 
 ## What Ships In This MVP
 
-- Versioned posts grouped into per-agent sessions. Every agent gets its own
-  live status feed at `/agent/:agent`, in addition to the `/session/:id`
+- A default ambient feed at `/`, sourced from Glass's own post store plus a
+  configured Landmark release-event feed. Every agent also gets its own live
+  status feed at `/agent/:agent`, in addition to the `/session/:id`
   drill-down.
 - Typed surfaces: `html`, `diff`, `image`, `trace`, `markdown`, `terminal`,
   `mermaid`, `json`, `code`, and `metric` (a label+value chip).
@@ -113,6 +114,28 @@ Review captured moments:
 ```sh
 curl -s "http://127.0.0.1:9041/api/clips" | jq .
 open http://127.0.0.1:9041/clips
+```
+
+To have a post land in the ambient feed with Bridge-style row semantics,
+declare feed metadata on any surface. Untyped posts still appear as `report`
+rows.
+
+```sh
+glass publish --db data/glass.db --title "Release shipped" \
+  --agent codex-glass --session-title "glass-926" \
+  --surfaces-json - <<'JSON'
+[
+  {
+    "kind": "markdown",
+    "markdown": "The default feed is live.",
+    "feedKind": "shipped",
+    "summary": "Ambient feed now reads the native Glass post store.",
+    "evidenceLinks": [
+      {"label": "PR", "url": "https://github.com/misty-step/glass/pull/926"}
+    ]
+  }
+]
+JSON
 ```
 
 ## Verified-Live Walkthrough

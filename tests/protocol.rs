@@ -1,5 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::routing::get;
+use axum::{Json as AxumJson, Router};
 use glass::{
     DoctorConfig, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router,
     run_doctor,
@@ -7,6 +9,7 @@ use glass::{
 use http_body_util::BodyExt;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
@@ -348,6 +351,158 @@ async fn recent_posts_summarize_agents_once_from_session_metadata() {
             .filter(|session| session["agent"] == "lead")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn recent_feed_projects_glass_posts_as_bridge_shaped_events() {
+    let glass = Glass::memory().expect("memory store");
+    let session = glass
+        .create_session(NewSession {
+            agent: "codex-glass".into(),
+            title: "glass-926 ambient feed".into(),
+            cwd: None,
+        })
+        .expect("session");
+    glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "Default feed shipped".into(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Markdown,
+                    json!({
+                        "markdown": "The default feed reads Glass posts.",
+                        "feedKind": "shipped",
+                        "summary": "Ambient feed is backed by the native post store.",
+                        "evidenceLinks": [{"label": "PR", "url": "https://github.com/misty-step/glass/pull/926"}]
+                    }),
+                )
+                .expect("surface"),
+            ],
+        })
+        .expect("publish");
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/feed/recent?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let events = value["events"].as_array().expect("events");
+    let event = events
+        .iter()
+        .find(|event| event["title"] == "Default feed shipped")
+        .expect("post event");
+    assert_eq!(event["kind"], "shipped");
+    assert_eq!(event["source"], "glass-posts");
+    assert_eq!(event["agent"], "codex-glass");
+    assert!(
+        event["evidenceLinks"]
+            .as_array()
+            .expect("evidence links")
+            .iter()
+            .any(|link| link["url"] == "https://github.com/misty-step/glass/pull/926")
+    );
+    assert!(
+        event["evidenceLinks"]
+            .as_array()
+            .expect("evidence links")
+            .iter()
+            .any(|link| link["url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("/s/"))),
+        "sandboxed surface URL is a native evidence link: {event}"
+    );
+}
+
+#[tokio::test]
+async fn default_view_loads_the_ambient_feed_endpoint_and_keeps_drilldowns_reachable() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Ambient feed"));
+    assert!(html.contains("/api/feed/recent?limit=80"));
+    assert!(html.contains("/agent/"));
+    assert!(html.contains("/session/"));
+    assert!(html.contains("feed-dialog"));
+    assert!(
+        !html.contains("wait_for_feedback") && !html.contains("reply_to_user"),
+        "the default feed must stay one-way"
+    );
+}
+
+#[tokio::test]
+async fn recent_feed_merges_configured_landmark_release_events() {
+    let _guard = landmark_env_lock().lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind landmark fixture");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        let app = Router::new().route(
+            "/events",
+            get(|| async {
+                AxumJson(json!({
+                    "events": [{
+                        "id": "landmark-glass-v0.2.0",
+                        "repo": "glass",
+                        "version": "v0.2.0",
+                        "title": "glass v0.2.0",
+                        "summary": "Release notes published by Landmark.",
+                        "created_at": 2_000_000_000_i64,
+                        "url": "https://github.com/misty-step/glass/releases/tag/v0.2.0"
+                    }]
+                }))
+            }),
+        );
+        axum::serve(listener, app).await.expect("landmark fixture");
+    });
+    let _env = EnvVarGuard::set(
+        "GLASS_LANDMARK_RELEASE_EVENTS_URL",
+        &format!("http://{addr}/events"),
+    );
+
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/feed/recent?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    server.abort();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["landmark"]["status"], "ok");
+    let events = value["events"].as_array().expect("events");
+    let release = events
+        .iter()
+        .find(|event| event["kind"] == "release")
+        .expect("release event");
+    assert_eq!(release["title"], "glass v0.2.0");
+    assert_eq!(release["source"], "landmark");
+    assert!(
+        release["evidenceLinks"]
+            .as_array()
+            .expect("evidence links")
+            .iter()
+            .any(|link| link["url"] == "https://github.com/misty-step/glass/releases/tag/v0.2.0")
     );
 }
 
@@ -921,4 +1076,35 @@ fn temp_db_path(prefix: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nonce}.db"))
+}
+
+fn landmark_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        // SAFETY: this test holds the process-wide landmark_env_lock before
+        // mutating this process env var, and the guard removes the var before
+        // the lock is released.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: see EnvVarGuard::set; this is the paired cleanup while the
+        // same async test still owns the process-wide env lock.
+        unsafe {
+            std::env::remove_var(self.key);
+        }
+    }
 }

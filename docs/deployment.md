@@ -44,6 +44,12 @@ synthesis endpoint to enable custom/arbitrary windows on
 Until weave ships that surface, custom windows degrade to the nearest shelf
 window (if available) or a clear error event.
 
+Set `GLASS_LANDMARK_RELEASE_EVENTS_URL` to the box-native Landmark release
+events JSON endpoint to merge release rows into the default ambient feed
+(`GET /api/feed/recent`, glass-926). Left unset, the feed still renders native
+Glass posts and reports Landmark as unconfigured; it never reads the retired
+laptop `~/.factory-lanes/feed/*.jsonl` files.
+
 Set `GLASS_POWDER_API_BASE_URL` and `GLASS_POWDER_API_KEY` (a read-scoped key
 is sufficient -- this route never writes) to enable the backlog report
 (`GET /api/backlog/{repo}`, glass-914). Left unset, that route returns a

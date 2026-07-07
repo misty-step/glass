@@ -48,6 +48,17 @@ pub const SURFACE_KINDS: [SurfaceKind; 10] = [
     SurfaceKind::Metric,
 ];
 
+pub const FEED_KINDS: [FeedKind; 8] = [
+    FeedKind::Shipped,
+    FeedKind::Report,
+    FeedKind::Blocked,
+    FeedKind::Question,
+    FeedKind::Note,
+    FeedKind::Digest,
+    FeedKind::Release,
+    FeedKind::Receipt,
+];
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SurfaceKind {
@@ -121,6 +132,59 @@ impl FromStr for SurfaceKind {
             .find(|kind| kind.as_str() == raw)
             .ok_or_else(|| anyhow!("unknown surface kind: {raw}"))
     }
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedKind {
+    Shipped,
+    #[default]
+    Report,
+    Blocked,
+    Question,
+    Note,
+    Digest,
+    Release,
+    Receipt,
+}
+
+impl FeedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeedKind::Shipped => "shipped",
+            FeedKind::Report => "report",
+            FeedKind::Blocked => "blocked",
+            FeedKind::Question => "question",
+            FeedKind::Note => "note",
+            FeedKind::Digest => "digest",
+            FeedKind::Release => "release",
+            FeedKind::Receipt => "receipt",
+        }
+    }
+}
+
+impl Display for FeedKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for FeedKind {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self> {
+        FEED_KINDS
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == raw)
+            .ok_or_else(|| anyhow!("unknown feed kind: {raw}"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceLink {
+    pub label: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1111,6 +1175,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/surface-kinds", get(surface_kinds))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/posts", post(publish_post))
+        .route("/api/feed/recent", get(recent_feed))
         .route("/api/posts/recent", get(recent_posts))
         .route("/api/posts/{id}", get(get_post).put(update_post))
         .route("/api/clips", get(list_clips).post(capture_clip))
@@ -1273,6 +1338,35 @@ struct RecentQuery {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct FeedQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FeedEvent {
+    id: String,
+    kind: FeedKind,
+    source: String,
+    title: String,
+    summary: String,
+    occurred_at: i64,
+    agent: Option<String>,
+    session_id: Option<String>,
+    session_title: Option<String>,
+    post_id: Option<String>,
+    evidence_links: Vec<EvidenceLink>,
+    detail_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LandmarkStatus {
+    status: &'static str,
+    message: Option<String>,
+}
+
 async fn recent_posts(
     State(glass): State<Glass>,
     Query(query): Query<RecentQuery>,
@@ -1336,6 +1430,67 @@ async fn recent_posts(
         "posts": view_posts,
         "sessions": session_views,
         "agents": agents,
+    })))
+}
+
+async fn recent_feed(
+    State(glass): State<Glass>,
+    Query(query): Query<FeedQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = query.limit.unwrap_or(80).clamp(1, 100);
+    let raw_posts = glass.list_recent_posts(limit)?;
+    let raw_sessions = glass.list_sessions()?;
+    let raw_session_by_id = raw_sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let posts = raw_posts
+        .into_iter()
+        .filter(|post| {
+            raw_session_by_id
+                .get(post.session_id.as_str())
+                .is_none_or(|session| !is_diagnostic_agent(&session.agent))
+        })
+        .collect::<Vec<_>>();
+    let sessions = raw_sessions
+        .into_iter()
+        .filter(|session| !is_diagnostic_agent(&session.agent))
+        .collect::<Vec<_>>();
+    let session_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let agents = summarize_agents(&posts, &sessions);
+    let now = now_seconds();
+    let session_views = sessions
+        .iter()
+        .map(|session| SessionView {
+            session,
+            is_live: now - session.last_active_at < LIVE_WINDOW_SECONDS,
+        })
+        .collect::<Vec<_>>();
+
+    let mut events = posts
+        .iter()
+        .map(|post| post_feed_event(post, session_by_id.get(post.session_id.as_str()).copied()))
+        .collect::<Vec<_>>();
+    let landmark = fetch_landmark_feed(limit).await;
+    events.extend(landmark.events);
+    events.sort_by(|left, right| {
+        right
+            .occurred_at
+            .cmp(&left.occurred_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    events.truncate(limit);
+
+    Ok(Json(json!({
+        "events": events,
+        "posts": posts,
+        "sessions": session_views,
+        "agents": agents,
+        "feedKinds": FEED_KINDS,
+        "landmark": landmark.status,
     })))
 }
 
@@ -1514,6 +1669,362 @@ fn render_clip_queue_body(clips: &[ClipQueueItem]) -> Result<String> {
         .iter()
         .map(|component| render_component(component, &ctx))
         .collect())
+}
+
+fn post_feed_event(post: &Post, session: Option<&Session>) -> FeedEvent {
+    let kind = feed_kind_for_post(post);
+    let evidence_links = evidence_links_for_post(post);
+    let surface_kinds = post
+        .surfaces
+        .iter()
+        .map(|surface| surface.kind.as_str())
+        .collect::<Vec<_>>();
+    let summary = declared_summary(post).unwrap_or_else(|| {
+        format!(
+            "{} surface(s): {}",
+            post.surfaces.len(),
+            surface_kinds.join(", ")
+        )
+    });
+    let mut detail_lines = Vec::new();
+    if let Some(session) = session {
+        detail_lines.push(format!("agent: {}", session.agent));
+        detail_lines.push(format!("session: {}", session.title));
+    }
+    detail_lines.push(format!("post: {}", post.id));
+    detail_lines.push(format!("version: {}", post.version));
+    detail_lines.push(format!("surfaces: {}", surface_kinds.join(", ")));
+    if let Some(detail) = declared_detail(post) {
+        detail_lines.push(detail);
+    }
+
+    FeedEvent {
+        id: format!("post:{}", post.id),
+        kind,
+        source: "glass-posts".to_string(),
+        title: post.title.clone(),
+        summary,
+        occurred_at: post.updated_at.max(post.created_at),
+        agent: session.map(|session| session.agent.clone()),
+        session_id: Some(post.session_id.clone()),
+        session_title: session.map(|session| session.title.clone()),
+        post_id: Some(post.id.clone()),
+        evidence_links,
+        detail_lines,
+    }
+}
+
+fn feed_kind_for_post(post: &Post) -> FeedKind {
+    post.surfaces
+        .iter()
+        .find_map(feed_kind_from_surface)
+        .unwrap_or_default()
+}
+
+fn feed_kind_from_surface(surface: &Surface) -> Option<FeedKind> {
+    string_field(&surface.fields, &["feedKind", "feed_kind", "feed"])
+        .or_else(|| {
+            nested_string_field(&surface.fields, "data", &["feedKind", "feed_kind", "kind"])
+        })
+        .and_then(|raw| FeedKind::from_str(raw).ok())
+}
+
+fn declared_summary(post: &Post) -> Option<String> {
+    post.surfaces.iter().find_map(|surface| {
+        string_field(&surface.fields, &["summary", "feedSummary", "feed_summary"])
+            .or_else(|| nested_string_field(&surface.fields, "data", &["summary", "feedSummary"]))
+            .map(trimmed_owned)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn declared_detail(post: &Post) -> Option<String> {
+    post.surfaces.iter().find_map(|surface| {
+        string_field(&surface.fields, &["detail", "body", "markdown"])
+            .or_else(|| {
+                nested_string_field(&surface.fields, "data", &["detail", "body", "markdown"])
+            })
+            .map(trimmed_owned)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn evidence_links_for_post(post: &Post) -> Vec<EvidenceLink> {
+    let mut links = Vec::new();
+    for surface in &post.surfaces {
+        links.extend(evidence_links_from_surface(surface));
+    }
+    links.push(EvidenceLink {
+        label: "post detail".to_string(),
+        url: format!("/session/{}/p/{}", post.session_id, post.id),
+    });
+    for (index, surface) in post.surfaces.iter().enumerate() {
+        let label = format!(
+            "{} {}",
+            surface.kind,
+            if surface.id.is_empty() {
+                (index + 1).to_string()
+            } else {
+                surface.id.clone()
+            }
+        );
+        if surface.kind.sandboxed() {
+            links.push(EvidenceLink {
+                label,
+                url: format!("/s/{}?part={index}", post.id),
+            });
+        } else if surface.kind == SurfaceKind::Image
+            && let Some(asset_id) = surface.fields.get("asset_id").and_then(Value::as_str)
+        {
+            links.push(EvidenceLink {
+                label,
+                url: format!("/a/{asset_id}"),
+            });
+        }
+    }
+    dedupe_evidence_links(links)
+}
+
+fn evidence_links_from_surface(surface: &Surface) -> Vec<EvidenceLink> {
+    let mut links = Vec::new();
+    for key in ["evidenceLinks", "evidence_links", "links"] {
+        if let Some(value) = surface.fields.get(key) {
+            links.extend(evidence_links_from_value(value));
+        }
+    }
+    if let Some(data) = surface.fields.get("data").and_then(Value::as_object) {
+        for key in ["evidenceLinks", "evidence_links", "links"] {
+            if let Some(value) = data.get(key) {
+                links.extend(evidence_links_from_value(value));
+            }
+        }
+    }
+    links
+}
+
+fn evidence_links_from_value(value: &Value) -> Vec<EvidenceLink> {
+    match value {
+        Value::Array(items) => items.iter().filter_map(evidence_link_from_value).collect(),
+        Value::String(url) => evidence_link_from_parts(None, url),
+        Value::Object(_) => evidence_link_from_value(value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn evidence_link_from_value(value: &Value) -> Option<EvidenceLink> {
+    match value {
+        Value::String(url) => evidence_link_from_parts(None, url).into_iter().next(),
+        Value::Object(object) => {
+            let url = string_field(object, &["url", "href", "link", "html_url"])?;
+            let label = string_field(object, &["label", "title", "text"]);
+            evidence_link_from_parts(label, url).into_iter().next()
+        }
+        _ => None,
+    }
+}
+
+fn evidence_link_from_parts(label: Option<&str>, url: &str) -> Vec<EvidenceLink> {
+    let url = url.trim();
+    if !safe_href(url) {
+        return Vec::new();
+    }
+    vec![EvidenceLink {
+        label: label.map_or_else(|| default_link_label(url), trimmed_owned),
+        url: url.to_string(),
+    }]
+}
+
+fn dedupe_evidence_links(links: Vec<EvidenceLink>) -> Vec<EvidenceLink> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for link in links {
+        if link.url.is_empty() || !seen.insert(link.url.clone()) {
+            continue;
+        }
+        out.push(link);
+    }
+    out
+}
+
+fn safe_href(url: &str) -> bool {
+    url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with('/')
+        || url.starts_with('#')
+}
+
+fn default_link_label(url: &str) -> String {
+    let after_scheme = url.split_once("//").map_or(url, |(_, rest)| rest);
+    truncate_chars(after_scheme.trim_start_matches('/'), 44)
+}
+
+fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+}
+
+fn nested_string_field<'a>(
+    object: &'a Map<String, Value>,
+    nested_key: &str,
+    keys: &[&str],
+) -> Option<&'a str> {
+    object
+        .get(nested_key)
+        .and_then(Value::as_object)
+        .and_then(|nested| string_field(nested, keys))
+}
+
+fn trimmed_owned(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+fn truncate_chars(raw: &str, limit: usize) -> String {
+    if raw.chars().count() <= limit {
+        return raw.to_string();
+    }
+    let suffix = "...";
+    let keep = limit.saturating_sub(suffix.len());
+    let mut out = raw.chars().take(keep).collect::<String>();
+    out.push_str(suffix);
+    out
+}
+
+struct LandmarkFeed {
+    events: Vec<FeedEvent>,
+    status: LandmarkStatus,
+}
+
+fn landmark_release_events_url() -> Option<String> {
+    std::env::var("GLASS_LANDMARK_RELEASE_EVENTS_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+async fn fetch_landmark_feed(limit: usize) -> LandmarkFeed {
+    let Some(url) = landmark_release_events_url() else {
+        return LandmarkFeed {
+            events: Vec::new(),
+            status: LandmarkStatus {
+                status: "unconfigured",
+                message: Some("GLASS_LANDMARK_RELEASE_EVENTS_URL is not configured".to_string()),
+            },
+        };
+    };
+    match fetch_landmark_release_events(&url, limit).await {
+        Ok(events) => LandmarkFeed {
+            events,
+            status: LandmarkStatus {
+                status: "ok",
+                message: None,
+            },
+        },
+        Err(message) => LandmarkFeed {
+            events: Vec::new(),
+            status: LandmarkStatus {
+                status: "error",
+                message: Some(message),
+            },
+        },
+    }
+}
+
+async fn fetch_landmark_release_events(url: &str, limit: usize) -> Result<Vec<FeedEvent>, String> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|err| format!("fetch {url}: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "fetch {url}: upstream returned {}",
+            response.status()
+        ));
+    }
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|err| format!("parse {url}: {err}"))?;
+    Ok(landmark_release_events_from_value(&value, limit))
+}
+
+fn landmark_release_events_from_value(value: &Value, limit: usize) -> Vec<FeedEvent> {
+    let Some(items) = value
+        .as_array()
+        .or_else(|| value.get("events").and_then(Value::as_array))
+        .or_else(|| value.get("releases").and_then(Value::as_array))
+    else {
+        return Vec::new();
+    };
+    let mut events = items
+        .iter()
+        .filter_map(landmark_release_event_from_value)
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| std::cmp::Reverse(event.occurred_at));
+    events.truncate(limit);
+    events
+}
+
+fn landmark_release_event_from_value(value: &Value) -> Option<FeedEvent> {
+    let object = value.as_object()?;
+    let repo = string_field(object, &["repo", "repository", "project"]).unwrap_or("landmark");
+    let version = string_field(object, &["version", "tag", "release"]).unwrap_or("release");
+    let title = string_field(object, &["title", "name"])
+        .map(trimmed_owned)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| format!("{repo} {version} released"));
+    let summary = string_field(object, &["summary", "body", "notes"])
+        .map(|raw| {
+            raw.lines()
+                .find(|line| !line.trim().is_empty())
+                .map_or_else(|| title.clone(), |line| truncate_chars(line.trim(), 180))
+        })
+        .unwrap_or_else(|| format!("Landmark release event for {repo} {version}."));
+    let occurred_at = timestamp_field(object, &["created_at", "published_at", "timestamp", "at"])
+        .unwrap_or_else(now_seconds);
+    let mut evidence_links = Vec::new();
+    for key in ["evidenceLinks", "evidence_links", "links"] {
+        if let Some(value) = object.get(key) {
+            evidence_links.extend(evidence_links_from_value(value));
+        }
+    }
+    if let Some(url) = string_field(object, &["url", "html_url"]) {
+        evidence_links.extend(evidence_link_from_parts(Some("release"), url));
+    }
+    let id = string_field(object, &["id", "event_id"])
+        .map(trimmed_owned)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| format!("landmark:{repo}:{version}:{occurred_at}"));
+    let detail_lines = vec![
+        format!("repo: {repo}"),
+        format!("version: {version}"),
+        "source: Landmark release events".to_string(),
+    ];
+
+    Some(FeedEvent {
+        id,
+        kind: FeedKind::Release,
+        source: "landmark".to_string(),
+        title,
+        summary,
+        occurred_at,
+        agent: Some("landmark".to_string()),
+        session_id: None,
+        session_title: None,
+        post_id: None,
+        evidence_links: dedupe_evidence_links(evidence_links),
+        detail_lines,
+    })
+}
+
+fn timestamp_field(object: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| {
+            value.as_i64().or_else(|| {
+                value
+                    .as_str()
+                    .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                    .map(|dt| dt.timestamp())
+            })
+        })
+    })
 }
 
 async fn upload_asset(
@@ -1937,6 +2448,10 @@ through sandboxed /s/:post_id?part=N documents. JSON, trace, image, and
 metric are rendered as data by the trusted viewer; metric is a label+value
 chip (`{"kind":"metric","label":"tests","value":"42 passed"}`).
 
+The ambient feed reads optional `feedKind`, `summary`, `detail`, and
+`evidenceLinks` fields from posted surface JSON. `feedKind` must be one of
+shipped, report, blocked, question, note, digest, release, or receipt.
+
 Glass is ONE-WAY: the operator watches the stage, but there is no reply
 channel back to the producing agent. Do not poll for or expect feedback;
 communication with the operator happens somewhere else.
@@ -2099,6 +2614,23 @@ try {
 .glass-dead-list { display: grid; gap: var(--ae-space-2); margin-top: var(--ae-space-3); }
 .glass-dead-list a { color: var(--ae-ink-muted); text-decoration: none; }
 .glass-dead-list a:hover { color: var(--ae-ink); }
+.glass-feed { display: grid; gap: var(--ae-space-3); }
+.glass-feed-row { border: 1px solid var(--ae-line); background: var(--ae-surface); }
+.glass-feed-main { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ae-space-3); padding: var(--ae-space-4) var(--ae-space-5); border: 0; background: transparent; color: var(--ae-ink); text-align: left; cursor: pointer; }
+.glass-feed-line { display: flex; align-items: center; gap: var(--ae-space-3); min-width: 0; }
+.glass-feed-title { font-weight: var(--ae-w-medium); overflow-wrap: anywhere; }
+.glass-feed-summary { color: var(--ae-ink-muted); overflow-wrap: anywhere; }
+.glass-feed-chip { flex: none; border: 1px solid var(--ae-line); padding: 2px 7px; font-family: var(--ae-font-mono); font-size: 11px; line-height: 1.4; text-transform: uppercase; color: var(--ae-ink-muted); }
+.glass-feed-chip-shipped { color: var(--ae-ok); }
+.glass-feed-chip-blocked { color: var(--ae-err); }
+.glass-feed-chip-question { color: var(--ae-warn); }
+.glass-feed-chip-release { color: var(--ae-accent); }
+.glass-feed-meta { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); }
+.glass-feed-links { display: flex; flex-wrap: wrap; gap: var(--ae-space-2); padding: 0 var(--ae-space-5) var(--ae-space-4); }
+.glass-feed-link { border: 1px solid var(--ae-line); padding: 2px 8px; color: var(--ae-ink-muted); text-decoration: none; font-size: 12px; }
+.glass-feed-link:hover { color: var(--ae-ink); border-color: var(--ae-ink); }
+.glass-feed-detail-lines { display: grid; gap: var(--ae-space-2); margin: var(--ae-space-4) 0; }
+.glass-feed-detail-lines p { margin: 0; overflow-wrap: anywhere; }
 .glass-post { border: 1px solid var(--ae-line); margin-bottom: var(--ae-space-6); }
 .glass-post-head { display: flex; justify-content: space-between; gap: var(--ae-space-4); padding: var(--ae-space-4) var(--ae-space-5); border-bottom: 1px solid var(--ae-line); }
 .glass-post-title { font-weight: var(--ae-w-medium); }
@@ -2115,8 +2647,11 @@ try {
 .glass-empty { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
 .glass-desk-header { margin-bottom: var(--ae-space-6); }
 #rail-agents { display: grid; gap: var(--ae-space-2); }
+#feed-dialog { max-width: 720px; width: min(92vw, 720px); }
 @media (max-width: 48rem) {
   .glass-surface iframe { min-height: 200px; }
+  .glass-feed-main { padding: var(--ae-space-4); }
+  .glass-feed-links { padding: 0 var(--ae-space-4) var(--ae-space-4); }
   /* The kit's own .ae-rail mobile rule expects rail links as its direct
      children so its row flex lays them out edge to edge; #rail-agents
      wraps Glass's dynamic agent list in one div for the renderer, so it
@@ -2136,7 +2671,7 @@ try {
     </a>
     <a data-sanctum-home href="{{SANCTUM_URL}}" aria-label="Back to Sanctum" title="Back to Sanctum"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"></path><path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg> Sanctum</a>
     <p class="ae-h">Agents</p>
-    <a href="/" id="rail-all">All agents</a>
+    <a href="/" id="rail-all">Ambient feed</a>
     <div id="rail-agents"></div>
     <p class="ae-h">Review</p>
     <a href="/clips">Clips</a>
@@ -2149,11 +2684,18 @@ try {
   </aside>
   <main class="ae-desk">
     <div id="desk-header" class="glass-desk-header"></div>
+    <section id="feed" class="glass-feed" aria-label="Ambient evidence feed"></section>
     <section id="wall" class="ae-wall glass-wall" aria-label="Live sessions"></section>
     <details id="dead" class="glass-dead" hidden></details>
     <section id="posts" aria-label="Status feed"><p class="glass-empty">No live surfaces yet.</p></section>
   </main>
 </div>
+<dialog id="feed-dialog" class="ae-dialog">
+  <div id="feed-dialog-body"></div>
+  <div class="ae-dialog-acts">
+    <button type="button" class="ae-button ae-button-quiet ae-button-compact" data-feed-close>Close</button>
+  </div>
+</dialog>
 <script>
 /* the mode recipe (Misty Step Aesthetic kit), inlined verbatim: toggle
    .dark/.light on the root, pin color-scheme, interruptible transition. */
@@ -2231,9 +2773,11 @@ const view = {
 
 let currentSessions = new Map();
 let renderedPostNodes = new Map();
+let currentFeedEvents = new Map();
 let lastPayload = '';
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ambient() { return !view.agent && !view.session; }
 function sessionFor(post) { return currentSessions.get(post.session_id) || {}; }
 function agentFor(post) { return sessionFor(post).agent || 'agent'; }
 function catFor(agent) {
@@ -2244,8 +2788,87 @@ function catFor(agent) {
 function fetchUrl() {
   if (view.agent) return `/api/posts/recent?agent=${encodeURIComponent(view.agent)}`;
   if (view.session) return `/api/posts/recent?sessionId=${encodeURIComponent(view.session)}`;
-  return '/api/posts/recent?limit=40';
+  return '/api/feed/recent?limit=80';
 }
+
+function safeHref(url) {
+  const raw = String(url || '').trim();
+  if (raw.startsWith('https://') || raw.startsWith('http://') || raw.startsWith('/') || raw.startsWith('#')) return raw;
+  return '#';
+}
+
+function linkTarget(url) {
+  return /^https?:\/\//.test(String(url || '')) ? ' target="_blank" rel="noreferrer"' : '';
+}
+
+function evidenceLinksHtml(links) {
+  if (!links || !links.length) return '<span class="glass-feed-meta">no evidence links</span>';
+  return links.map(link => {
+    const href = safeHref(link.url);
+    return `<a class="glass-feed-link" href="${esc(href)}"${linkTarget(href)}>${esc(link.label || link.url)}</a>`;
+  }).join('');
+}
+
+function kindLabel(kind) {
+  return String(kind || 'report').toLowerCase();
+}
+
+function eventTime(ts) {
+  return new Date((ts || 0) * 1000).toLocaleString();
+}
+
+function buildFeedRow(event) {
+  const kind = kindLabel(event.kind);
+  const actor = event.agent || event.source || 'glass';
+  const source = event.sessionTitle || event.source || '';
+  return `<article class="glass-feed-row" data-feed-id="${esc(event.id)}">
+    <button type="button" class="glass-feed-main" data-feed-open="${esc(event.id)}">
+      <span class="glass-feed-line">
+        <span class="glass-feed-chip glass-feed-chip-${esc(kind)}">${esc(kind)}</span>
+        <span class="glass-feed-title">${esc(event.title)}</span>
+      </span>
+      <span class="glass-feed-summary">${esc(event.summary)}</span>
+      <span class="glass-feed-meta">${esc(actor)}${source ? ' · ' + esc(source) : ''} · ${esc(eventTime(event.occurredAt))}</span>
+    </button>
+    <div class="glass-feed-links">${evidenceLinksHtml(event.evidenceLinks || [])}</div>
+  </article>`;
+}
+
+function renderFeed(host, events, landmark) {
+  const feed = events || [];
+  currentFeedEvents = new Map(feed.map(event => [event.id, event]));
+  if (!feed.length) {
+    const landmarkText = landmark && landmark.status === 'error' ? ` Landmark: ${landmark.message || 'unavailable'}.` : '';
+    host.innerHTML = `<p class="glass-empty">No ambient evidence yet.${esc(landmarkText)}</p>`;
+    return;
+  }
+  host.innerHTML = feed.map(buildFeedRow).join('');
+  host.querySelectorAll('[data-feed-open]').forEach(button => {
+    button.addEventListener('click', () => openFeedDetail(button.getAttribute('data-feed-open')));
+  });
+}
+
+function openFeedDetail(id) {
+  const event = currentFeedEvents.get(id);
+  if (!event) return;
+  const dialog = document.getElementById('feed-dialog');
+  const body = document.getElementById('feed-dialog-body');
+  const lines = (event.detailLines || []).map(line => `<p>${esc(line)}</p>`).join('');
+  body.innerHTML = `
+    <p class="ae-dialog-title">${esc(event.title)}</p>
+    <p class="glass-feed-meta">${esc(kindLabel(event.kind))} · ${esc(event.source || 'glass')} · ${esc(eventTime(event.occurredAt))}</p>
+    <p>${esc(event.summary || '')}</p>
+    <div class="glass-feed-detail-lines">${lines}</div>
+    <div class="glass-feed-links">${evidenceLinksHtml(event.evidenceLinks || [])}</div>`;
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute('open', '');
+}
+
+document.querySelector('[data-feed-close]').addEventListener('click', () => {
+  const dialog = document.getElementById('feed-dialog');
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute('open');
+});
 
 function surfaceHtml(post, surface, index) {
   const kind = surface.kind;
@@ -2316,12 +2939,12 @@ function renderPosts(host, posts) {
 function renderDeskHeader() {
   const host = document.getElementById('desk-header');
   if (view.agent) {
-    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; All agents</a></p><h2 class="ae-h">${esc(view.agent)}</h2>`;
+    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Ambient feed</a></p><h2 class="ae-h">${esc(view.agent)}</h2>`;
   } else if (view.session) {
     const session = currentSessions.get(view.session);
-    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; All agents</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
+    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Ambient feed</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
   } else {
-    host.innerHTML = '';
+    host.innerHTML = `<h1 class="ae-strong">Ambient feed</h1>`;
   }
 }
 
@@ -2375,7 +2998,17 @@ function render(data) {
   renderDeskHeader();
   renderRail(data.agents || []);
   renderWall(data.sessions || [], data.posts || []);
-  renderPosts(document.getElementById('posts'), data.posts || []);
+  const feedHost = document.getElementById('feed');
+  const postsHost = document.getElementById('posts');
+  if (ambient()) {
+    feedHost.hidden = false;
+    postsHost.hidden = true;
+    renderFeed(feedHost, data.events || [], data.landmark || null);
+  } else {
+    feedHost.hidden = true;
+    postsHost.hidden = false;
+    renderPosts(postsHost, data.posts || []);
+  }
 }
 
 async function load() {

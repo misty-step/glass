@@ -5,8 +5,10 @@ intentionally smaller than the implementation:
 
 - HTTP API for sessions, posts, assets, sandbox rendering, setup docs, and
   MCP-compatible JSON-RPC.
-- Viewer HTML served from `/`, `/agent/:agent`, and `/session/:id`, polling
-  `/api/posts/recent` and rendering trusted data directly while loading rich
+- Viewer HTML served from `/`, `/agent/:agent`, and `/session/:id`. The
+  default `/` route polls `/api/feed/recent`, an ambient reverse-chron feed
+  projected from native Glass posts plus configured Landmark release events;
+  the drill-down routes keep polling `/api/posts/recent` while loading rich
   surfaces through `/s/:post_id?part=N`.
 - Domain methods on `Glass` that tests exercise directly for exact asset
   semantics.
@@ -39,6 +41,17 @@ posts are never pushed out by a busier one's. `/session/:id` keeps the
 single-session drill-down via `?sessionId=...`. Both routes serve the same
 `VIEWER_HTML`; the client reads its own route out of `window.location` since
 there is no server-side templating.
+
+## Ambient Feed
+
+`GET /api/feed/recent` is a projection over box-native sources only: the local
+SQLite post store and the configured `GLASS_LANDMARK_RELEASE_EVENTS_URL`.
+Producers can declare Bridge-compatible row semantics by putting `feedKind`,
+`summary`, `detail`, and `evidenceLinks` on any posted surface. If no
+`feedKind` is declared, the post appears as a `report` row. Evidence links are
+declared links plus native Glass detail links (`/session/...`, `/s/...`, and
+`/a/...`); the viewer opens a read-only detail dialog and exposes no reply or
+approval channel.
 
 ## Dead Session Demotion
 
