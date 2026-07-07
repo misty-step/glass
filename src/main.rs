@@ -7,9 +7,13 @@ use glass::{
     DoctorConfig, Glass, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router, run_doctor,
 };
 use serde_json::json;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_observability();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         None | Some("serve") => serve(args.collect()).await,
@@ -81,13 +85,43 @@ async fn serve(args: Vec<String>) -> Result<()> {
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("parse bind address {bind}"))?;
-    let glass = Glass::open(&db)?;
+    let glass = Glass::open(&db).inspect_err(|_| {
+        glass::canary::report_error(
+            "glass.serve.open_db.failed",
+            "command=serve error_kind=open_db",
+        );
+    })?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
+        .inspect_err(|_| {
+            glass::canary::report_error("glass.serve.bind.failed", "command=serve error_kind=bind");
+        })
         .with_context(|| format!("bind {addr}"))?;
+    glass::canary::start_health_loop();
     println!("glass listening on http://{addr} with db {db}");
-    axum::serve(listener, app_router(glass)).await?;
+    axum::serve(listener, app_router(glass))
+        .await
+        .inspect_err(|_| {
+            glass::canary::report_error(
+                "glass.serve.axum.failed",
+                "command=serve error_kind=axum_serve",
+            );
+        })?;
     Ok(())
+}
+
+fn init_observability() {
+    let _ = tracing_log::LogTracer::init();
+    let fmt_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_filter(fmt_filter);
+    let canary_layer = glass::canary::CanaryLayer.with_filter(LevelFilter::ERROR);
+    let _ = tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(canary_layer)
+        .try_init();
+    glass::canary::install_panic_hook();
 }
 
 async fn publish(args: Vec<String>) -> Result<()> {

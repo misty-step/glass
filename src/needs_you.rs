@@ -147,18 +147,47 @@ struct TriageAnnotation {
 }
 
 async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
-    let base = powder_base_url()
-        .ok_or_else(|| "GLASS_POWDER_API_BASE_URL is not configured".to_string())?;
-    let key =
-        powder_api_key().ok_or_else(|| "GLASS_POWDER_API_KEY is not configured".to_string())?;
+    let base = match powder_base_url() {
+        Some(base) => base,
+        None => {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                "route=/api/needs-you upstream=powder error_kind=missing_base_url",
+            );
+            return Err("GLASS_POWDER_API_BASE_URL is not configured".to_string());
+        }
+    };
+    let key = match powder_api_key() {
+        Some(key) => key,
+        None => {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                "route=/api/needs-you upstream=powder error_kind=missing_api_key",
+            );
+            return Err("GLASS_POWDER_API_KEY is not configured".to_string());
+        }
+    };
     let url = awaiting_input_url_from_api_base(&base);
     let response = reqwest::Client::new()
         .get(&url)
         .bearer_auth(&key)
         .send()
         .await
-        .map_err(|err| format!("fetch {url}: {err}"))?;
+        .map_err(|err| {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                "route=/api/needs-you upstream=powder error_kind=transport",
+            );
+            format!("fetch {url}: {err}")
+        })?;
     if !response.status().is_success() {
+        crate::canary::report_error(
+            "glass.needs_you.fetch.failed",
+            &format!(
+                "route=/api/needs-you upstream=powder upstream_status={} error_kind=upstream_status",
+                response.status().as_u16()
+            ),
+        );
         return Err(format!(
             "fetch {url}: upstream returned {}",
             response.status()
@@ -168,7 +197,13 @@ async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
         .json::<AwaitingResponse>()
         .await
         .map(|body| body.awaiting)
-        .map_err(|err| format!("parse {url}: {err}"))?;
+        .map_err(|err| {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                "route=/api/needs-you upstream=powder error_kind=parse",
+            );
+            format!("parse {url}: {err}")
+        })?;
     sort_awaiting(&mut items);
     Ok(items)
 }
@@ -242,7 +277,7 @@ fn trigger_triage_refresh_once() {
     let script = triage_script_path();
     tokio::spawn(async move {
         if script.is_file() {
-            let _ = tokio::time::timeout(
+            let result = tokio::time::timeout(
                 Duration::from_secs(90),
                 tokio::process::Command::new("python3")
                     .arg(&script)
@@ -250,6 +285,30 @@ fn trigger_triage_refresh_once() {
                     .output(),
             )
             .await;
+            match result {
+                Ok(Ok(output)) if output.status.success() => {}
+                Ok(Ok(output)) => {
+                    crate::canary::report_error(
+                        "glass.needs_you.triage_refresh.failed",
+                        &format!(
+                            "task=ask-triage error_kind=exit_status status={}",
+                            output.status.code().unwrap_or(-1)
+                        ),
+                    );
+                }
+                Ok(Err(_)) => {
+                    crate::canary::report_error(
+                        "glass.needs_you.triage_refresh.failed",
+                        "task=ask-triage error_kind=spawn",
+                    );
+                }
+                Err(_) => {
+                    crate::canary::report_error(
+                        "glass.needs_you.triage_refresh.failed",
+                        "task=ask-triage error_kind=timeout",
+                    );
+                }
+            }
         }
         TRIAGE_RUNNING.store(false, Ordering::SeqCst);
     });
@@ -566,12 +625,20 @@ pub async fn answer(
         ));
     }
     let base = powder_base_url().ok_or_else(|| {
+        crate::canary::report_error(
+            "glass.needs_you.answer.failed",
+            "route=/api/needs-you/answer upstream=powder error_kind=missing_base_url",
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "GLASS_POWDER_API_BASE_URL is not configured".to_string(),
         )
     })?;
     let key = powder_api_key().ok_or_else(|| {
+        crate::canary::report_error(
+            "glass.needs_you.answer.failed",
+            "route=/api/needs-you/answer upstream=powder error_kind=missing_api_key",
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "GLASS_POWDER_API_KEY is not configured".to_string(),
@@ -588,13 +655,25 @@ pub async fn answer(
         .json(&json!({"actor": request.actor, "answer": request.answer}))
         .send()
         .await
-        .map_err(|err| (StatusCode::BAD_GATEWAY, format!("post {url}: {err}")))?;
+        .map_err(|err| {
+            crate::canary::report_error(
+                "glass.needs_you.answer.failed",
+                "route=/api/needs-you/answer upstream=powder error_kind=transport",
+            );
+            (StatusCode::BAD_GATEWAY, format!("post {url}: {err}"))
+        })?;
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        crate::canary::report_error(
+            "glass.needs_you.answer.failed",
+            &format!(
+                "route=/api/needs-you/answer upstream=powder upstream_status={} error_kind=upstream_status",
+                status.as_u16()
+            ),
+        );
         return Err((
             StatusCode::BAD_GATEWAY,
-            format!("powder answer_input returned {status}: {body}"),
+            format!("powder answer_input returned {status}"),
         ));
     }
     Ok(AxumJson(AnswerResponse { ok: true }))

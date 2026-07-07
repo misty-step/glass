@@ -124,22 +124,44 @@ fn synthesis_endpoint_url() -> Option<String> {
 }
 
 async fn fetch_from_shelf(window: &str) -> Result<Value, String> {
-    let base = shelf_base_url()
-        .ok_or_else(|| "GLASS_FLEET_RETRO_SHELF_URL is not configured".to_string())?;
+    let base = match shelf_base_url() {
+        Some(base) => base,
+        None => {
+            crate::canary::report_error(
+                "glass.window_report.fetch.failed",
+                "route=/api/window-report/{window} upstream=fleet-retro-shelf error_kind=missing_shelf_url",
+            );
+            return Err("GLASS_FLEET_RETRO_SHELF_URL is not configured".to_string());
+        }
+    };
     let url = format!("{}/{window}/spec.json", base.trim_end_matches('/'));
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|err| format!("fetch {url}: {err}"))?;
+    let response = reqwest::get(&url).await.map_err(|err| {
+        crate::canary::report_error(
+            "glass.window_report.fetch.failed",
+            "route=/api/window-report/{window} upstream=fleet-retro-shelf error_kind=transport",
+        );
+        format!("fetch {url}: {err}")
+    })?;
     if !response.status().is_success() {
+        crate::canary::report_error(
+            "glass.window_report.fetch.failed",
+            &format!(
+                "route=/api/window-report/{{window}} upstream=fleet-retro-shelf upstream_status={} error_kind=upstream_status",
+                response.status().as_u16()
+            ),
+        );
         return Err(format!(
             "fetch {url}: upstream returned {}",
             response.status()
         ));
     }
-    response
-        .json::<Value>()
-        .await
-        .map_err(|err| format!("parse {url}: {err}"))
+    response.json::<Value>().await.map_err(|err| {
+        crate::canary::report_error(
+            "glass.window_report.fetch.failed",
+            "route=/api/window-report/{window} upstream=fleet-retro-shelf error_kind=parse",
+        );
+        format!("parse {url}: {err}")
+    })
 }
 
 /// Fetch (or return the cached copy of) a window's fleet-retro shelf spec.

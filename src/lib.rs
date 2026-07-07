@@ -18,8 +18,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tower_http::catch_panic::CatchPanicLayer;
 
 mod backlog_report;
+pub mod canary;
 mod needs_you;
 mod rep1;
 mod window_report;
@@ -779,6 +781,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/needs-you", get(needs_you::needs_you_report))
         .route("/api/needs-you/answer", post(needs_you::answer))
         .with_state(glass)
+        .layer(CatchPanicLayer::custom(canary::panic_response))
 }
 
 async fn viewer() -> Html<String> {
@@ -841,18 +844,25 @@ async fn create_session(
     State(glass): State<Glass>,
     Json(input): Json<NewSession>,
 ) -> Result<Json<Session>, ApiError> {
-    Ok(Json(glass.create_session(input)?))
+    Ok(Json(glass.create_session(input).map_err(|error| {
+        api_failure("glass.create_session.failed", "/api/sessions", error)
+    })?))
 }
 
 async fn list_sessions(State(glass): State<Glass>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({ "sessions": glass.list_sessions()? })))
+    let sessions = glass
+        .list_sessions()
+        .map_err(|error| api_failure("glass.list_sessions.failed", "/api/sessions", error))?;
+    Ok(Json(json!({ "sessions": sessions })))
 }
 
 async fn publish_post(
     State(glass): State<Glass>,
     Json(input): Json<PublishPost>,
 ) -> Result<Json<PublishOutcome>, ApiError> {
-    Ok(Json(glass.publish_post(input)?))
+    Ok(Json(glass.publish_post(input).map_err(|error| {
+        api_failure("glass.publish_post.failed", "/api/posts", error)
+    })?))
 }
 
 async fn update_post(
@@ -860,14 +870,18 @@ async fn update_post(
     AxumPath(id): AxumPath<String>,
     Json(input): Json<PublishPost>,
 ) -> Result<Json<PublishOutcome>, ApiError> {
-    Ok(Json(glass.update_post(&id, input)?))
+    Ok(Json(glass.update_post(&id, input).map_err(|error| {
+        api_failure("glass.update_post.failed", "/api/posts/{id}", error)
+    })?))
 }
 
 async fn get_post(
     State(glass): State<Glass>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Post>, ApiError> {
-    Ok(Json(glass.get_post(&id)?))
+    Ok(Json(glass.get_post(&id).map_err(|error| {
+        api_failure("glass.get_post.failed", "/api/posts/{id}", error)
+    })?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -891,8 +905,12 @@ async fn recent_posts(
     } else {
         query.limit.unwrap_or(30)
     };
-    let raw_posts = glass.list_recent_posts(fetch_limit)?;
-    let raw_sessions = glass.list_sessions()?;
+    let raw_posts = glass
+        .list_recent_posts(fetch_limit)
+        .map_err(|error| api_failure("glass.recent_posts.failed", "/api/posts/recent", error))?;
+    let raw_sessions = glass
+        .list_sessions()
+        .map_err(|error| api_failure("glass.recent_posts.failed", "/api/posts/recent", error))?;
     let raw_session_by_id = raw_sessions
         .iter()
         .map(|session| (session.id.as_str(), session))
@@ -1017,7 +1035,9 @@ async fn upload_asset(
     let filename = headers
         .get("x-filename")
         .and_then(|value| value.to_str().ok());
-    let asset = glass.store_asset(content_type, filename, &body)?;
+    let asset = glass
+        .store_asset(content_type, filename, &body)
+        .map_err(|error| api_failure("glass.upload_asset.failed", "/api/assets", error))?;
     Ok(Json(
         json!({ "asset": asset, "url": format!("/a/{}", asset.id) }),
     ))
@@ -1027,7 +1047,9 @@ async fn serve_asset(
     State(glass): State<Glass>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response, ApiError> {
-    let (asset, data) = glass.load_asset(&id)?;
+    let (asset, data) = glass
+        .load_asset(&id)
+        .map_err(|error| api_failure("glass.serve_asset.failed", "/a/{id}", error))?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -1053,7 +1075,9 @@ async fn render_sandbox(
     AxumPath(post_id): AxumPath<String>,
     Query(query): Query<RenderQuery>,
 ) -> Result<Response, ApiError> {
-    let post = glass.get_post(&post_id)?;
+    let post = glass
+        .get_post(&post_id)
+        .map_err(|error| api_failure("glass.render_sandbox.failed", "/s/{post_id}", error))?;
     let part = query.part.unwrap_or(0);
     let surface = post
         .surfaces
@@ -1080,11 +1104,14 @@ async fn mcp(State(glass): State<Glass>, Json(request): Json<Value>) -> Json<Val
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     match mcp_dispatch(&glass, &request) {
         Ok(result) => Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
-        Err(error) => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32602, "message": error.to_string() }
-        })),
+        Err(error) => {
+            canary::report_error("glass.mcp.failed", "route=/mcp error_kind=dispatch");
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32602, "message": error.to_string() }
+            }))
+        }
     }
 }
 
@@ -1235,6 +1262,7 @@ const SANDBOX_CSP: &str = "sandbox allow-scripts allow-forms allow-popups; defau
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    reported: bool,
 }
 
 impl ApiError {
@@ -1242,6 +1270,19 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            reported: false,
+        }
+    }
+
+    fn error_kind(&self) -> &'static str {
+        if self.status == StatusCode::NOT_FOUND {
+            "not_found"
+        } else if self.status == StatusCode::BAD_REQUEST {
+            "bad_request"
+        } else if self.status.is_server_error() {
+            "internal"
+        } else {
+            "http_error"
         }
     }
 }
@@ -1254,12 +1295,40 @@ impl From<anyhow::Error> for ApiError {
         } else {
             StatusCode::BAD_REQUEST
         };
-        Self { status, message }
+        Self {
+            status,
+            message,
+            reported: false,
+        }
     }
+}
+
+fn api_failure(error_class: &str, route: &str, error: anyhow::Error) -> ApiError {
+    let mut error = ApiError::from(error);
+    canary::report_error(
+        error_class,
+        &format!(
+            "route={route} status={} error_kind={}",
+            error.status.as_u16(),
+            error.error_kind()
+        ),
+    );
+    error.reported = true;
+    error
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.status.is_server_error() && !self.reported {
+            canary::report_error(
+                "glass.axum.5xx",
+                &format!(
+                    "route=unknown status={} error_kind={}",
+                    self.status.as_u16(),
+                    self.error_kind()
+                ),
+            );
+        }
         (self.status, Json(json!({ "error": self.message }))).into_response()
     }
 }
