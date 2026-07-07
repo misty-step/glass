@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 mod backlog_report;
+mod needs_you;
 mod rep1;
 mod window_report;
 
@@ -774,6 +775,9 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/rep1/{window}", get(rep1::rep1_report))
         .route("/backlog/{repo}", get(backlog_report::backlog_shell))
         .route("/api/backlog/{repo}", get(backlog_report::backlog_report))
+        .route("/needs-you", get(needs_you::needs_you_shell))
+        .route("/api/needs-you", get(needs_you::needs_you_report))
+        .route("/api/needs-you/answer", post(needs_you::answer))
         .with_state(glass)
 }
 

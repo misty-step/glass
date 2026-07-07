@@ -42,6 +42,19 @@ is sufficient -- this route never writes) to enable the backlog report
 (`GET /api/backlog/{repo}`, glass-914). Left unset, that route returns a
 clear "not configured" error event.
 
+The Needs You view (`GET /needs-you`, glass-918) reuses the same
+`GLASS_POWDER_API_BASE_URL`/`GLASS_POWDER_API_KEY` pair, but this route
+*does* write (it answers `awaiting_input` runs), so the key must carry
+write scope (e.g. factory-ops's `~/.factory-lanes/.powder-bridge-key`).
+It also best-effort shells out to the model curator at
+`~/.factory-lanes/scripts/ask-triage.py` (override the path with
+`GLASS_ASK_TRIAGE_SCRIPT`) and reads its annotation cache at
+`~/.factory-lanes/.ask-triage.json` (override with
+`GLASS_ASK_TRIAGE_CACHE`); a missing/dead curator degrades to untriaged
+rows rather than failing the view. Set credentials in the launchd plist by
+reading from a sanctioned key FILE path at each start (`$(cat
+~/.factory-lanes/.powder-bridge-key)`), never via `op` resolution.
+
 Starting fresh on posts is acceptable for the campaign cutover when migration is
 not explicitly required. If preserving an existing native Glass stage, reuse the
 same `.glass-live/glass.db` file. Do not point Glass at the retired Sideshow DB;

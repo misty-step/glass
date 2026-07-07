@@ -715,6 +715,66 @@ async fn backlog_report_streams_a_skeleton_then_a_named_config_error_when_powder
     );
 }
 
+#[tokio::test]
+async fn needs_you_shell_serves_the_rail_page() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/needs-you")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Needs You"));
+    assert!(
+        html.contains("ny-dialog"),
+        "the draft-safety sheet dialog must be present"
+    );
+}
+
+#[tokio::test]
+async fn needs_you_report_streams_a_skeleton_then_a_named_config_error_when_powder_unconfigured() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/needs-you")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("event: skeleton"));
+    assert!(
+        text.contains("event: error") && text.contains("GLASS_POWDER_API_BASE_URL"),
+        "an unconfigured Powder connection must fail loudly, not silently: {text}"
+    );
+}
+
+#[tokio::test]
+async fn needs_you_answer_rejects_an_empty_answer_before_ever_reaching_powder() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/needs-you/answer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"run_id": "run-1", "answer": "   ", "actor": "operator"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 fn temp_db_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
