@@ -57,10 +57,26 @@ struct ListCardsResponse {
 }
 
 async fn fetch_cards(repo: &str) -> Result<Vec<RawCard>, String> {
-    let base = powder_base_url()
-        .ok_or_else(|| "GLASS_POWDER_API_BASE_URL is not configured".to_string())?;
-    let key =
-        powder_api_key().ok_or_else(|| "GLASS_POWDER_API_KEY is not configured".to_string())?;
+    let base = match powder_base_url() {
+        Some(base) => base,
+        None => {
+            crate::canary::report_error(
+                "glass.backlog.fetch.failed",
+                "route=/api/backlog/{repo} upstream=powder error_kind=missing_base_url",
+            );
+            return Err("GLASS_POWDER_API_BASE_URL is not configured".to_string());
+        }
+    };
+    let key = match powder_api_key() {
+        Some(key) => key,
+        None => {
+            crate::canary::report_error(
+                "glass.backlog.fetch.failed",
+                "route=/api/backlog/{repo} upstream=powder error_kind=missing_api_key",
+            );
+            return Err("GLASS_POWDER_API_KEY is not configured".to_string());
+        }
+    };
     let url = format!(
         "{}/api/v1/cards?repo={repo}&limit=500",
         base.trim_end_matches('/')
@@ -70,8 +86,21 @@ async fn fetch_cards(repo: &str) -> Result<Vec<RawCard>, String> {
         .bearer_auth(key)
         .send()
         .await
-        .map_err(|err| format!("fetch {url}: {err}"))?;
+        .map_err(|err| {
+            crate::canary::report_error(
+                "glass.backlog.fetch.failed",
+                "route=/api/backlog/{repo} upstream=powder error_kind=transport",
+            );
+            format!("fetch {url}: {err}")
+        })?;
     if !response.status().is_success() {
+        crate::canary::report_error(
+            "glass.backlog.fetch.failed",
+            &format!(
+                "route=/api/backlog/{{repo}} upstream=powder upstream_status={} error_kind=upstream_status",
+                response.status().as_u16()
+            ),
+        );
         return Err(format!(
             "fetch {url}: upstream returned {}",
             response.status()
@@ -81,7 +110,13 @@ async fn fetch_cards(repo: &str) -> Result<Vec<RawCard>, String> {
         .json::<ListCardsResponse>()
         .await
         .map(|body| body.cards)
-        .map_err(|err| format!("parse {url}: {err}"))
+        .map_err(|err| {
+            crate::canary::report_error(
+                "glass.backlog.fetch.failed",
+                "route=/api/backlog/{repo} upstream=powder error_kind=parse",
+            );
+            format!("parse {url}: {err}")
+        })
 }
 
 fn text(s: impl Into<String>) -> Vec<InlineNode> {

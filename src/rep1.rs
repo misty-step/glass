@@ -321,6 +321,10 @@ pub async fn rep1_report(
                         );
                     }
                     Err(err) => {
+                        crate::canary::report_error(
+                            "glass.rep1.render.failed",
+                            "route=/api/rep1/{window} error_kind=render",
+                        );
                         yield Ok::<_, Infallible>(
                             Event::default().event("error").data(
                                 json!({"stage": "error", "window": window, "message": err}).to_string(),
@@ -329,6 +333,10 @@ pub async fn rep1_report(
                     }
                 },
                 Err(err) => {
+                    crate::canary::report_error(
+                        "glass.rep1.parse.failed",
+                        "route=/api/rep1/{window} upstream=fleet-retro-shelf error_kind=parse",
+                    );
                     yield Ok::<_, Infallible>(
                         Event::default().event("error").data(
                             json!({
