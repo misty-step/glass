@@ -31,6 +31,30 @@ fn powder_base_url() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn powder_board_url() -> Option<String> {
+    let operator_url = std::env::var("GLASS_POWDER_BOARD_URL")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let api_base = powder_base_url();
+    powder_board_url_from(operator_url.as_deref(), api_base.as_deref())
+}
+
+fn powder_board_url_from(operator_url: Option<&str>, api_base: Option<&str>) -> Option<String> {
+    let base = operator_url
+        .filter(|value| !value.is_empty())
+        .or_else(|| api_base.filter(|value| !value.is_empty()))?;
+    Some(board_url_from_base(base))
+}
+
+fn board_url_from_base(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with("/board") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/board")
+    }
+}
+
 fn powder_api_key() -> Option<String> {
     std::env::var("GLASS_POWDER_API_KEY")
         .ok()
@@ -127,10 +151,7 @@ async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
         .ok_or_else(|| "GLASS_POWDER_API_BASE_URL is not configured".to_string())?;
     let key =
         powder_api_key().ok_or_else(|| "GLASS_POWDER_API_KEY is not configured".to_string())?;
-    let url = format!(
-        "{}/api/v1/runs/awaiting-input?limit=100",
-        base.trim_end_matches('/')
-    );
+    let url = awaiting_input_url_from_api_base(&base);
     let response = reqwest::Client::new()
         .get(&url)
         .bearer_auth(&key)
@@ -150,6 +171,13 @@ async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
         .map_err(|err| format!("parse {url}: {err}"))?;
     sort_awaiting(&mut items);
     Ok(items)
+}
+
+fn awaiting_input_url_from_api_base(base: &str) -> String {
+    format!(
+        "{}/api/v1/runs/awaiting-input?limit=100",
+        base.trim_end_matches('/')
+    )
 }
 
 /// factory-ops's own sort contract (bridge.py's `collect_needs_you`):
@@ -422,18 +450,24 @@ fn render_needs_you(
     items: &[AwaitingItem],
     annotations: &HashMap<String, TriageAnnotation>,
 ) -> String {
+    let board_url = powder_board_url().unwrap_or_else(|| "#".to_string());
+    render_needs_you_with_board_url(items, annotations, &board_url)
+}
+
+fn render_needs_you_with_board_url(
+    items: &[AwaitingItem],
+    annotations: &HashMap<String, TriageAnnotation>,
+    board_url: &str,
+) -> String {
     if items.is_empty() {
         return r#"<p class="ny-dim">Nothing in the fleet is awaiting your input right now.</p>"#
             .to_string();
     }
     let now = Utc::now();
-    let board_url = powder_base_url()
-        .map(|base| format!("{}/board", base.trim_end_matches('/')))
-        .unwrap_or_else(|| "#".to_string());
 
     let rendered: Vec<Rendered> = items
         .iter()
-        .map(|item| render_item(item, annotations.get(&item.run.id), now, &board_url))
+        .map(|item| render_item(item, annotations.get(&item.run.id), now, board_url))
         .collect();
 
     let mut out = String::new();
@@ -852,6 +886,55 @@ mod tests {
     fn render_needs_you_reports_an_explicit_empty_state() {
         let html = render_needs_you(&[], &HashMap::new());
         assert!(html.contains("Nothing in the fleet is awaiting your input"));
+    }
+
+    #[test]
+    fn render_needs_you_uses_operator_facing_board_url_when_configured() {
+        let items = vec![awaiting_item(
+            "glass-922",
+            "run-922",
+            "team-lead",
+            "pick the right board URL",
+        )];
+        let board_url = powder_board_url_from(
+            Some("https://powder.sanctum.tailnet"),
+            Some("http://127.0.0.1:4175"),
+        )
+        .expect("board URL");
+        let html = render_needs_you_with_board_url(&items, &HashMap::new(), &board_url);
+
+        assert!(html.contains(r#"href="https://powder.sanctum.tailnet/board#card-glass-922""#));
+        assert!(!html.contains("http://127.0.0.1:4175"));
+    }
+
+    #[test]
+    fn board_url_falls_back_to_api_base_when_operator_url_is_unset() {
+        assert_eq!(
+            powder_board_url_from(None, Some("http://127.0.0.1:4175/")),
+            Some("http://127.0.0.1:4175/board".to_string())
+        );
+    }
+
+    #[test]
+    fn board_url_does_not_duplicate_a_configured_board_path() {
+        assert_eq!(
+            powder_board_url_from(Some("https://powder.sanctum.tailnet/board/"), None),
+            Some("https://powder.sanctum.tailnet/board".to_string())
+        );
+    }
+
+    #[test]
+    fn awaiting_fetch_url_keeps_using_the_api_base_when_board_url_differs() {
+        let api_base = "http://127.0.0.1:4175/";
+        let board_url =
+            powder_board_url_from(Some("https://powder.sanctum.tailnet"), Some(api_base))
+                .expect("board URL");
+
+        assert_eq!(board_url, "https://powder.sanctum.tailnet/board");
+        assert_eq!(
+            awaiting_input_url_from_api_base(api_base),
+            "http://127.0.0.1:4175/api/v1/runs/awaiting-input?limit=100"
+        );
     }
 
     #[test]
