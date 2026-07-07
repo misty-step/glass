@@ -562,21 +562,29 @@ fn sanctum_url_from_honors_configured_override_and_falls_back_to_same_origin() {
 }
 
 #[tokio::test]
-async fn window_report_rejects_windows_fleet_retro_does_not_produce() {
+async fn window_report_custom_windows_degrade_to_clear_fallback_events_when_unconfigured() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
             Request::builder()
-                .uri("/api/window-report/monthly")
+                .uri("/api/window-report/custom?since=2026-07-07T00:00:00Z&until=2026-07-07T01:00:00Z&scope=fleet")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .expect("response");
-    assert_eq!(
-        response.status(),
-        StatusCode::NOT_FOUND,
-        "glass-917 scopes REP-1 to the two windows fleet-retro actually publishes \
-         (daily, weekly); arbitrary windows are glass-919's on-demand synthesis service"
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("event: skeleton"));
+    assert!(
+        text.contains("event: fallback") && text.contains("GLASS_SYNTHESIS_ENDPOINT"),
+        "custom windows must name the missing synthesis endpoint instead of 404ing or \
+         silently rendering blank: {text}"
+    );
+    assert!(
+        text.contains("event: error") && text.contains("GLASS_FLEET_RETRO_SHELF_URL"),
+        "with no shelf configured, the fallback must also fail loudly with the missing env \
+         var named: {text}"
     );
 }
 
