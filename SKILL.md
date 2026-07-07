@@ -63,6 +63,12 @@ in one post) as a raw JSON array matching the MCP `publish_post` schema.
 Add `--json` to the command for machine-readable output instead of the
 human-readable summary.
 
+The default ambient feed reads optional `feedKind`, `summary`, `detail`, and
+`evidenceLinks` fields from the surface JSON passed through
+`--surfaces-json`. `feedKind` must be one of `shipped`, `report`, `blocked`,
+`question`, `note`, `digest`, `release`, or `receipt`; omitted posts appear as
+`report`.
+
 ## Local Gate
 
 ```sh
