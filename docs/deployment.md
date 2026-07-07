@@ -37,6 +37,11 @@ enable REP-1's window report (`GET /api/window-report/{daily,weekly}`,
 glass-917). Left unset, that route returns a clear "not configured" error
 event rather than a hardcoded personal shelf.
 
+Set `GLASS_POWDER_API_BASE_URL` and `GLASS_POWDER_API_KEY` (a read-scoped key
+is sufficient -- this route never writes) to enable the backlog report
+(`GET /api/backlog/{repo}`, glass-914). Left unset, that route returns a
+clear "not configured" error event.
+
 Starting fresh on posts is acceptable for the campaign cutover when migration is
 not explicitly required. If preserving an existing native Glass stage, reuse the
 same `.glass-live/glass.db` file. Do not point Glass at the retired Sideshow DB;

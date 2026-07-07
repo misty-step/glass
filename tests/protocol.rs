@@ -672,6 +672,49 @@ async fn rep1_report_streams_a_glass_919_pending_error_for_non_live_windows() {
     );
 }
 
+#[tokio::test]
+async fn backlog_shell_echoes_the_requested_repo_into_the_form_input() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/backlog/glass")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!html.contains("{{REPO}}"));
+    assert!(html.contains(r#"value="glass""#));
+}
+
+#[tokio::test]
+async fn backlog_report_streams_a_skeleton_then_a_named_config_error_when_powder_unconfigured() {
+    // No GLASS_POWDER_API_BASE_URL/GLASS_POWDER_API_KEY configured in the
+    // test process: the fetch deterministically fails fast, exercising the
+    // real skeleton-then-error contract without live Powder access.
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/backlog/glass")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("event: skeleton"));
+    assert!(
+        text.contains("event: error") && text.contains("GLASS_POWDER_API_BASE_URL"),
+        "an unconfigured Powder connection must fail loudly with the missing env var \
+         named, not silently: {text}"
+    );
+}
+
 fn temp_db_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
