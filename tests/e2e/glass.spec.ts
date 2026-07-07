@@ -6,6 +6,25 @@ test("viewer renders seeded posts, theme modes, and sandboxed iframe", async ({
 }) => {
   await page.goto("/");
 
+  const seedRow = page.locator(".glass-feed-row", {
+    hasText: "Rendered e2e seed",
+  });
+  await expect(seedRow).toHaveCount(1);
+  await expect(seedRow.locator(".glass-feed-chip")).toHaveText("report");
+  await expect(seedRow.locator(".glass-feed-title")).toHaveText(
+    "Rendered e2e seed",
+  );
+  await expect(seedRow.locator(".glass-feed-summary")).toHaveText(
+    "3 surface(s): html, metric, json",
+  );
+  await expect(seedRow.locator(".glass-feed-meta")).toContainText("e2e-agent");
+  await expect(seedRow.locator(".glass-feed-meta")).toContainText(
+    "Rendered e2e lane",
+  );
+
+  await seedRow.getByRole("link", { name: "post detail" }).click();
+  await expect(page).toHaveURL(/\/session\/[^/]+\/p\/[^/]+$/);
+
   await expect(page.locator(".glass-post-title")).toHaveText("Rendered e2e seed");
   await expect(page.locator(".glass-post-meta").first()).toContainText(
     "e2e-agent",
