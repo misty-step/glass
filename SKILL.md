@@ -75,7 +75,10 @@ The default ambient feed reads optional `feedKind`, `summary`, `detail`, and
 ./scripts/check.sh
 ```
 
-Equivalent to `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
+Runs the Rust floor (`cargo fmt --all -- --check`, `cargo clippy --locked
+--workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`,
+`cargo build --release --locked`), the `cargo llvm-cov` ratchet from
+`.coverage-ratchet`, and the Playwright rendered e2e harness.
 
 ## Red Lines
 

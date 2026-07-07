@@ -2603,6 +2603,8 @@ try {
   if (m === 'dark' || m === 'light') {
     document.documentElement.classList.add(m);
     document.documentElement.style.colorScheme = m;
+  } else {
+    document.documentElement.style.colorScheme = 'light dark';
   }
 } catch (e) {}
 </script>
@@ -2697,20 +2699,24 @@ try {
   </div>
 </dialog>
 <script>
-/* the mode recipe (Misty Step Aesthetic kit), inlined verbatim: toggle
-   .dark/.light on the root, pin color-scheme, interruptible transition. */
+/* the mode recipe (Misty Step Aesthetic kit), with Glass's e2e-visible
+   system/dark/light cycle pinned on the same .ae-mode affordance. */
 (() => {
   const root = document.documentElement;
+  const modes = ['system', 'dark', 'light'];
   let activeTransition = null;
   let easingTimer = 0;
   let runId = 0;
-  let targetDark = null;
-  const isDark = () =>
-    root.classList.contains('dark')
-      ? true
-      : root.classList.contains('light')
-        ? false
-        : matchMedia('(prefers-color-scheme: dark)').matches;
+  let targetMode = null;
+  const storedMode = () => {
+    try {
+      const mode = localStorage.getItem('ae-mode');
+      return modes.includes(mode) ? mode : 'system';
+    } catch (e) {
+      return 'system';
+    }
+  };
+  const currentMode = () => targetMode || root.dataset.mode || storedMode();
   const reducedMode = matchMedia('(prefers-reduced-motion: reduce)');
   const clearAnimation = () => {
     if (activeTransition && activeTransition.skipTransition) activeTransition.skipTransition();
@@ -2718,21 +2724,33 @@ try {
     if (easingTimer) { clearTimeout(easingTimer); easingTimer = 0; }
     root.classList.remove('ae-vt-mode', 'ae-mode-easing');
   };
-  const applyMode = (dark) => {
-    root.classList.toggle('dark', dark);
-    root.classList.toggle('light', !dark);
-    root.style.colorScheme = dark ? 'dark' : 'light';
-    try { localStorage.setItem('ae-mode', dark ? 'dark' : 'light'); } catch (e) {}
+  const updateButtons = (mode) => {
+    document.querySelectorAll('.ae-mode').forEach((btn) => {
+      btn.dataset.mode = mode;
+      btn.setAttribute('aria-label', `color mode: ${mode}`);
+      btn.setAttribute('title', `Color mode: ${mode}`);
+    });
   };
+  const applyMode = (mode) => {
+    root.classList.toggle('dark', mode === 'dark');
+    root.classList.toggle('light', mode === 'light');
+    root.style.colorScheme = mode === 'system' ? 'light dark' : mode;
+    root.dataset.mode = mode;
+    try { localStorage.setItem('ae-mode', mode); } catch (e) {}
+    updateButtons(mode);
+  };
+  applyMode(storedMode());
   document.querySelectorAll('.ae-mode').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const nextDark = !(targetDark ?? isDark());
+      const mode = currentMode();
+      const nextMode = modes[(modes.indexOf(mode) + 1) % modes.length];
       const id = ++runId;
-      targetDark = nextDark;
-      const flip = () => { if (id !== runId) return; applyMode(nextDark); };
+      targetMode = nextMode;
+      const flip = () => { if (id !== runId) return; applyMode(nextMode); };
       clearAnimation();
       if (reducedMode.matches) {
         flip();
+        targetMode = null;
       } else if (document.startViewTransition) {
         root.classList.add('ae-vt-mode');
         activeTransition = document.startViewTransition(flip);
@@ -2745,6 +2763,7 @@ try {
           if (id !== runId) return;
           root.classList.remove('ae-vt-mode');
           activeTransition = null;
+          targetMode = null;
           if (easingTimer) { clearTimeout(easingTimer); easingTimer = 0; }
         });
       } else {
@@ -2754,6 +2773,7 @@ try {
           if (id !== runId) return;
           root.classList.remove('ae-mode-easing');
           easingTimer = 0;
+          targetMode = null;
         }, 180);
       }
     });
