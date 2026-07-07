@@ -24,6 +24,9 @@ the runtime with a native Rust service.
 - A viewer built on the Misty Step Aesthetic kit (`/aesthetic.css`), with a
   keyed post-diff renderer so polling never re-mounts a live surface's
   iframe unless that post actually changed.
+- A read-only review report at `/review/sample`: narration before raw diff,
+  three cited context layers (change, Powder ticket, VISION ref), reviewer
+  sanity status, and raw diff available only behind a disclosure.
 - `glass publish` CLI subcommand wrapping the same core the MCP tool calls,
   plus curl-first setup docs and a small stateless MCP-compatible HTTP
   endpoint for consumers without CLI access.
