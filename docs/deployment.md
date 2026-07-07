@@ -37,6 +37,13 @@ enable REP-1's window report (`GET /api/window-report/{daily,weekly}`,
 glass-917). Left unset, that route returns a clear "not configured" error
 event rather than a hardcoded personal shelf.
 
+Set `GLASS_SYNTHESIS_ENDPOINT` to weave's future on-demand fleet-retro
+synthesis endpoint to enable custom/arbitrary windows on
+`GET /api/window-report/{window}?since=...&until=...`. The endpoint contract is
+[`docs/synthesis-endpoint-contract.md`](synthesis-endpoint-contract.md).
+Until weave ships that surface, custom windows degrade to the nearest shelf
+window (if available) or a clear error event.
+
 Set `GLASS_POWDER_API_BASE_URL` and `GLASS_POWDER_API_KEY` (a read-scoped key
 is sufficient -- this route never writes) to enable the backlog report
 (`GET /api/backlog/{repo}`, glass-914). Left unset, that route returns a
