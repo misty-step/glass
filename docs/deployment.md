@@ -31,6 +31,12 @@ Set `GLASS_SANCTUM_URL` to the portal root if this deployment sits behind a
 Sanctum portal (see the viewer's cross-repo home affordance, glass-915); left
 unset, the affordance falls back to an inert same-origin link.
 
+Set `GLASS_FLEET_RETRO_SHELF_URL` to the bastion artifact shelf's fleet-retro
+publish base (e.g. `https://<your-tailnet-host>/artifacts/a/fleet-retro`) to
+enable REP-1's window report (`GET /api/window-report/{daily,weekly}`,
+glass-917). Left unset, that route returns a clear "not configured" error
+event rather than a hardcoded personal shelf.
+
 Starting fresh on posts is acceptable for the campaign cutover when migration is
 not explicitly required. If preserving an existing native Glass stage, reuse the
 same `.glass-live/glass.db` file. Do not point Glass at the retired Sideshow DB;

@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+mod window_report;
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub const SURFACE_KINDS: [SurfaceKind; 10] = [
@@ -762,6 +764,10 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/a/{id}", get(serve_asset))
         .route("/s/{post_id}", get(render_sandbox))
         .route("/mcp", post(mcp))
+        .route(
+            "/api/window-report/{window}",
+            get(window_report::window_report),
+        )
         .with_state(glass)
 }
 

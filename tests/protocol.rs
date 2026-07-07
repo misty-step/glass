@@ -561,6 +561,61 @@ fn sanctum_url_from_honors_configured_override_and_falls_back_to_same_origin() {
     assert_eq!(glass::sanctum_url_from(None), "/");
 }
 
+#[tokio::test]
+async fn window_report_rejects_windows_fleet_retro_does_not_produce() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/window-report/monthly")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "glass-917 scopes REP-1 to the two windows fleet-retro actually publishes \
+         (daily, weekly); arbitrary windows are glass-919's on-demand synthesis service"
+    );
+}
+
+#[tokio::test]
+async fn window_report_streams_a_skeleton_before_the_shelf_fetch_resolves() {
+    // No GLASS_FLEET_RETRO_SHELF_URL configured in the test process: the
+    // shelf fetch deterministically fails fast with a clear message, so this
+    // exercises the real skeleton-then-resolved-event streaming contract
+    // without depending on network access or a live shelf.
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/window-report/daily")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(content_type.contains("text/event-stream"));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("event: skeleton"),
+        "the skeleton event must be emitted before the shelf fetch resolves: {text}"
+    );
+    assert!(
+        text.contains("event: error") && text.contains("GLASS_FLEET_RETRO_SHELF_URL"),
+        "an unconfigured shelf must fail loudly with the missing env var named, not \
+         silently: {text}"
+    );
+}
+
 fn temp_db_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
