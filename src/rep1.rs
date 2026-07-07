@@ -149,7 +149,11 @@ fn extract_ticket_id(title: &str) -> Option<String> {
                 && suffix.chars().all(|c| c.is_ascii_digit())
                 && prefix
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                // A repo/ticket slug has a letter in it somewhere; without
+                // this a bare ISO date fragment like "2026-07-06" (all
+                // digits and hyphens) false-matches as a ticket id.
+                && prefix.chars().any(|c| c.is_ascii_lowercase());
             looks_like_ticket.then(|| token.to_string())
         })
 }
@@ -475,6 +479,23 @@ mod tests {
     #[test]
     fn extract_ticket_id_returns_none_when_no_ticket_shaped_token_exists() {
         assert_eq!(extract_ticket_id("just a plain sentence with no ids"), None);
+    }
+
+    #[test]
+    fn extract_ticket_id_does_not_false_match_a_bare_iso_date() {
+        // Regression: live fleet-retro citation titles carry bare dates like
+        // "2026-07-06" mid-sentence, which is digits-and-hyphens shaped just
+        // like a ticket id (prefix "2026-07", suffix "06") -- caught live
+        // against the real daily shelf spec, where it fabricated two fake
+        // ticket groups.
+        assert_eq!(
+            extract_ticket_id("incident on 2026-07-06 caused a rotation"),
+            None
+        );
+        assert_eq!(
+            extract_ticket_id("glass-915 shipped on 2026-07-07"),
+            Some("glass-915".to_string())
+        );
     }
 
     #[test]
