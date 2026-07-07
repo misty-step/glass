@@ -16,5 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.0.0
+          cache: npm
       - run: ./scripts/check.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: target/coverage/**
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rendered-e2e
+          path: |
+            target/e2e/junit.xml
+            target/e2e/test-results/**
+            target/e2e/playwright-report/**
+          if-no-files-found: error

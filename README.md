@@ -184,4 +184,19 @@ verified-live Glass deployment; otherwise merge code and leave deployment or
 ./scripts/check.sh
 ```
 
-The same command runs in GitHub Actions.
+The same command runs in GitHub Actions. It keeps the original Rust floor
+(`cargo fmt --all -- --check`, `cargo clippy --locked --workspace
+--all-targets -- -D warnings`, `cargo test --locked --workspace`) and adds:
+
+- `cargo build --release --locked`
+- `scripts/coverage.sh`, which runs `cargo llvm-cov` and fails below the
+  checked-in `.coverage-ratchet` line-coverage floor while writing reports to
+  `target/coverage/`
+- `scripts/e2e.sh`, which installs the pinned Playwright dependency, launches a
+  seeded local Glass server plus a mock Powder API, and browser-tests the
+  rendered viewer, theme control, sandbox iframe path, and backlog report
+  surface
+
+Local prerequisite tools: `cargo-llvm-cov` and Node/npm. Playwright's Chromium
+browser is installed by the e2e script; on Linux/CI the script also asks
+Playwright to install OS browser dependencies.

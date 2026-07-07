@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "html",
+    "id": "html-proof",
+    "html": "<main><h1 id=\"sandbox-proof\">Sandbox Proof</h1><button id=\"sandbox-button\" onclick=\"document.body.dataset.clicked='yes'\">Mark sandbox</button></main>"
+  },
+  {
+    "kind": "metric",
+    "id": "metric-proof",
+    "label": "seed",
+    "value": "green"
+  },
+  {
+    "kind": "json",
+    "id": "json-proof",
+    "data": {
+      "fixture": "trusted-viewer"
+    }
+  }
+]
