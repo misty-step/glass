@@ -30,6 +30,9 @@ the runtime with a native Rust service.
 - `glass publish` CLI subcommand wrapping the same core the MCP tool calls,
   plus curl-first setup docs and a small stateless MCP-compatible HTTP
   endpoint for consumers without CLI access.
+- A one-way clip primitive: `POST /api/clips` and MCP `capture_clip` mark an
+  interesting post/surface moment into `/clips` with context, evidence links,
+  and a deterministic draft caption.
 
 ## Quickstart
 
@@ -91,6 +94,27 @@ Every running agent has its own feed:
 curl -s "http://127.0.0.1:9041/api/posts/recent?agent=claude-session" | jq .
 ```
 
+Mark a moment for the review queue:
+
+```sh
+curl -s -X POST http://127.0.0.1:9041/api/clips \
+  -H 'content-type: application/json' \
+  --data '{
+    "session_id": "ses-id",
+    "post_id": "post-id",
+    "surface_index": 0,
+    "range": { "start": 0, "end": 30 },
+    "note": "This surprised me."
+  }' | jq .
+```
+
+Review captured moments:
+
+```sh
+curl -s "http://127.0.0.1:9041/api/clips" | jq .
+open http://127.0.0.1:9041/clips
+```
+
 ## Verified-Live Walkthrough
 
 From a fresh checkout, the operator path should end with a running service that
@@ -139,9 +163,9 @@ curl -s http://127.0.0.1:9041/setup
 curl -s http://127.0.0.1:9041/agent-howto
 ```
 
-MCP-capable clients can use the stateless HTTP endpoint at `/mcp`. The MVP tool
-surface is `publish_post` only — Glass is one-way, so there is no feedback or
-reply tool. Agents with a local `glass` binary have a shipped skill at
+MCP-capable clients can use the stateless HTTP endpoint at `/mcp`. The tool
+surface includes `publish_post` and one-way `capture_clip`; there is no
+feedback or reply tool. Agents with a local `glass` binary have a shipped skill at
 [`SKILL.md`](SKILL.md) documenting the `publish`/`doctor` contract, matching
 the pattern used by misty-canary/misty-powder/misty-bitterblossom.
 

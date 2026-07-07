@@ -14,6 +14,12 @@ use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Utc;
+use glance_catalog::leaf::Metric;
+use glance_catalog::structural::{Cell, CellValue, ColumnSpec, Hero, Row, Table};
+use glance_catalog::{
+    Component, InlineNode, REPORT, RenderContext, render_component, validate_layout,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -272,6 +278,93 @@ pub struct PublishOutcome {
     pub url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipRange {
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+}
+
+impl ClipRange {
+    fn validate(&self) -> Result<()> {
+        if self.start.is_none() && self.end.is_none() {
+            bail!("clip range requires start or end");
+        }
+        if self.start.is_some_and(|value| value < 0) || self.end.is_some_and(|value| value < 0) {
+            bail!("clip range values must be non-negative");
+        }
+        if let (Some(start), Some(end)) = (self.start, self.end)
+            && start > end
+        {
+            bail!("clip range start must be <= end");
+        }
+        Ok(())
+    }
+
+    fn label(&self) -> Option<String> {
+        match (self.start, self.end) {
+            (Some(start), Some(end)) => Some(format!("{start}s-{end}s")),
+            (Some(start), None) => Some(format!("from {start}s")),
+            (None, Some(end)) => Some(format!("until {end}s")),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Clip {
+    pub id: String,
+    pub session_id: String,
+    pub post_id: String,
+    pub post_version: i64,
+    pub surface_id: Option<String>,
+    pub surface_index: Option<usize>,
+    pub range: Option<ClipRange>,
+    pub note: Option<String>,
+    pub caption: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureClip {
+    #[serde(alias = "sessionId")]
+    pub session_id: String,
+    #[serde(alias = "postId")]
+    pub post_id: String,
+    #[serde(default, alias = "surfaceId")]
+    pub surface_id: Option<String>,
+    #[serde(default, alias = "surfaceIndex")]
+    pub surface_index: Option<usize>,
+    #[serde(default)]
+    pub range: Option<ClipRange>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipEvidenceLink {
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipContext {
+    pub session: Session,
+    pub post: Post,
+    pub post_version: i64,
+    pub surface: Option<Surface>,
+    pub surface_index: Option<usize>,
+    pub evidence_links: Vec<ClipEvidenceLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipQueueItem {
+    pub clip: Clip,
+    pub context: ClipContext,
+    pub draft_caption: String,
+}
+
 #[derive(Clone)]
 pub struct Glass {
     inner: Arc<Mutex<Store>>,
@@ -329,6 +422,16 @@ impl Glass {
     pub fn list_recent_posts(&self, limit: usize) -> Result<Vec<Post>> {
         let store = self.lock()?;
         store.list_recent_posts(limit)
+    }
+
+    pub fn capture_clip(&self, input: CaptureClip) -> Result<ClipQueueItem> {
+        let mut store = self.lock()?;
+        store.capture_clip(input)
+    }
+
+    pub fn list_clip_queue(&self, limit: usize) -> Result<Vec<ClipQueueItem>> {
+        let store = self.lock()?;
+        store.list_clip_queue(limit)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
@@ -398,6 +501,22 @@ impl Store {
               created_at INTEGER NOT NULL,
               last_accessed_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS clips (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id),
+              post_id TEXT NOT NULL REFERENCES posts(id),
+              post_version INTEGER NOT NULL,
+              surface_id TEXT,
+              surface_index INTEGER,
+              range_json TEXT,
+              note TEXT,
+              caption TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS clips_created_at_idx
+              ON clips(created_at DESC);
+            CREATE INDEX IF NOT EXISTS clips_session_idx
+              ON clips(session_id, post_id);
             "#,
         )?;
         // Glass is ONE-WAY as of glass-912: the comment/feedback surface and
@@ -586,6 +705,108 @@ impl Store {
         Ok(posts)
     }
 
+    fn capture_clip(&mut self, input: CaptureClip) -> Result<ClipQueueItem> {
+        if input.session_id.trim().is_empty() {
+            bail!("session_id is required");
+        }
+        if input.post_id.trim().is_empty() {
+            bail!("post_id is required");
+        }
+        if let Some(range) = &input.range {
+            range.validate()?;
+        }
+        let session = self.get_session(&input.session_id)?;
+        let post = self.get_post(&input.post_id)?;
+        if post.session_id != session.id {
+            bail!("post {} does not belong to session {}", post.id, session.id);
+        }
+        let surface_id = normalize_optional_text(input.surface_id);
+        let surface_index = input.surface_index;
+        let (_, surface) =
+            resolve_surface_ref(&post.surfaces, surface_id.as_deref(), surface_index)?;
+        let note = normalize_optional_text(input.note);
+        let caption = draft_clip_caption(
+            &session,
+            &post,
+            surface.as_ref(),
+            input.range.as_ref(),
+            note.as_deref(),
+        );
+        let now = now_seconds();
+        let clip = Clip {
+            id: fresh_id("clip"),
+            session_id: session.id.clone(),
+            post_id: post.id.clone(),
+            post_version: post.version,
+            surface_id,
+            surface_index,
+            range: input.range,
+            note,
+            caption,
+            created_at: now,
+        };
+        self.conn.execute(
+            "INSERT INTO clips (id, session_id, post_id, post_version, surface_id, surface_index, range_json, note, caption, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                clip.id,
+                clip.session_id,
+                clip.post_id,
+                clip.post_version,
+                clip.surface_id,
+                clip.surface_index.map(|index| index as i64),
+                clip.range
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                clip.note,
+                clip.caption,
+                clip.created_at,
+            ],
+        )?;
+        self.clip_queue_item(clip)
+    }
+
+    fn list_clip_queue(&self, limit: usize) -> Result<Vec<ClipQueueItem>> {
+        let limit = limit.clamp(1, 100) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, post_id, post_version, surface_id, surface_index, range_json, note, caption, created_at
+             FROM clips ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let clips = stmt
+            .query_map([limit], row_to_clip)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        clips
+            .into_iter()
+            .map(|clip| self.clip_queue_item(clip))
+            .collect()
+    }
+
+    fn clip_queue_item(&self, clip: Clip) -> Result<ClipQueueItem> {
+        let session = self.get_session(&clip.session_id)?;
+        let post = self.get_post(&clip.post_id)?;
+        let version_surfaces = post_surfaces_for_version(&post, clip.post_version);
+        let (surface_index, surface) = version_surfaces
+            .and_then(|surfaces| {
+                find_surface_ref(surfaces, clip.surface_id.as_deref(), clip.surface_index)
+            })
+            .unwrap_or((clip.surface_index, None));
+        let evidence_links = clip_evidence_links(&clip, surface_index);
+        let post_version = clip.post_version;
+        Ok(ClipQueueItem {
+            draft_caption: clip.caption.clone(),
+            clip,
+            context: ClipContext {
+                session,
+                post,
+                post_version,
+                surface,
+                surface_index,
+                evidence_links,
+            },
+        })
+    }
+
     fn store_asset(
         &mut self,
         content_type: &str,
@@ -673,6 +894,8 @@ impl Store {
 
     fn delete_probe_session(&mut self, session_id: &str) -> Result<()> {
         self.conn
+            .execute("DELETE FROM clips WHERE session_id = ?1", [session_id])?;
+        self.conn
             .execute("DELETE FROM posts WHERE session_id = ?1", [session_id])?;
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
@@ -717,6 +940,24 @@ fn row_to_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
     })
 }
 
+fn row_to_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
+    let range_json: Option<String> = row.get(6)?;
+    Ok(Clip {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        post_id: row.get(2)?,
+        post_version: row.get(3)?,
+        surface_id: row.get(4)?,
+        surface_index: row.get::<_, Option<i64>>(5)?.map(|value| value as usize),
+        range: range_json
+            .map(|raw| serde_json::from_str(&raw).map_err(json_error_to_sql))
+            .transpose()?,
+        note: row.get(7)?,
+        caption: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
 fn json_error_to_sql(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
@@ -730,6 +971,111 @@ fn normalize_surfaces(surfaces: Vec<Surface>) -> Result<Vec<Surface>> {
         .enumerate()
         .map(|(index, surface)| surface.normalize(index))
         .collect()
+}
+
+fn normalize_optional_text(input: Option<String>) -> Option<String> {
+    input
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_surface_ref(
+    surfaces: &[Surface],
+    surface_id: Option<&str>,
+    surface_index: Option<usize>,
+) -> Result<(Option<usize>, Option<Surface>)> {
+    if surface_id.is_none() && surface_index.is_none() {
+        return Ok((None, None));
+    }
+    find_surface_ref(surfaces, surface_id, surface_index).ok_or_else(|| {
+        anyhow!(
+            "surface reference not found: id={:?} index={:?}",
+            surface_id,
+            surface_index
+        )
+    })
+}
+
+fn find_surface_ref(
+    surfaces: &[Surface],
+    surface_id: Option<&str>,
+    surface_index: Option<usize>,
+) -> Option<(Option<usize>, Option<Surface>)> {
+    if let Some(index) = surface_index {
+        let surface = surfaces.get(index)?;
+        if let Some(id) = surface_id
+            && surface.id != id
+        {
+            return None;
+        }
+        return Some((Some(index), Some(surface.clone())));
+    }
+    let id = surface_id?;
+    surfaces
+        .iter()
+        .enumerate()
+        .find(|(_, surface)| surface.id == id)
+        .map(|(index, surface)| (Some(index), Some(surface.clone())))
+}
+
+fn post_surfaces_for_version(post: &Post, version: i64) -> Option<&[Surface]> {
+    if post.version == version {
+        return Some(&post.surfaces);
+    }
+    post.history
+        .iter()
+        .find(|entry| entry.version == version)
+        .map(|entry| entry.surfaces.as_slice())
+}
+
+fn clip_evidence_links(clip: &Clip, surface_index: Option<usize>) -> Vec<ClipEvidenceLink> {
+    let mut links = vec![
+        ClipEvidenceLink {
+            label: "session post".to_string(),
+            url: format!("/session/{}/p/{}", clip.session_id, clip.post_id),
+        },
+        ClipEvidenceLink {
+            label: "post json".to_string(),
+            url: format!("/api/posts/{}", clip.post_id),
+        },
+    ];
+    if let Some(index) = surface_index {
+        links.push(ClipEvidenceLink {
+            label: "surface render".to_string(),
+            url: format!("/s/{}?part={index}", clip.post_id),
+        });
+    }
+    links
+}
+
+fn draft_clip_caption(
+    session: &Session,
+    post: &Post,
+    surface: Option<&Surface>,
+    range: Option<&ClipRange>,
+    note: Option<&str>,
+) -> String {
+    // This is the deterministic caption seam. A future model-written caption
+    // can replace only this function while policy, storage, and review queue
+    // mechanics stay deterministic.
+    let mut parts = vec![format!(
+        "{} marked \"{}\" v{}",
+        session.agent, post.title, post.version
+    )];
+    if let Some(surface) = surface {
+        parts.push(format!("{} surface {}", surface.kind, surface.id));
+    }
+    if let Some(label) = range.and_then(ClipRange::label) {
+        parts.push(label);
+    }
+    if let Some(note) = note {
+        parts.push(note.to_string());
+    }
+    parts.join(" - ")
+}
+
+fn text(s: impl Into<String>) -> Vec<InlineNode> {
+    vec![InlineNode::Text { text: s.into() }]
 }
 
 fn fresh_id(prefix: &str) -> String {
@@ -759,6 +1105,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/session/{session_id}", get(viewer))
         .route("/session/{session_id}/p/{post_id}", get(viewer))
         .route("/agent/{agent}", get(viewer))
+        .route("/clips", get(clips_page))
         .route("/setup", get(setup))
         .route("/agent-howto", get(agent_howto))
         .route("/api/surface-kinds", get(surface_kinds))
@@ -766,6 +1113,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/posts", post(publish_post))
         .route("/api/posts/recent", get(recent_posts))
         .route("/api/posts/{id}", get(get_post).put(update_post))
+        .route("/api/clips", get(list_clips).post(capture_clip))
         .route("/api/assets", post(upload_asset))
         .route("/a/{id}", get(serve_asset))
         .route("/s/{post_id}", get(render_sandbox))
@@ -884,6 +1232,33 @@ async fn get_post(
     Ok(Json(glass.get_post(&id).map_err(|error| {
         api_failure("glass.get_post.failed", "/api/posts/{id}", error)
     })?))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClipQuery {
+    limit: Option<usize>,
+}
+
+async fn capture_clip(
+    State(glass): State<Glass>,
+    Json(input): Json<CaptureClip>,
+) -> Result<Json<ClipQueueItem>, ApiError> {
+    Ok(Json(glass.capture_clip(input)?))
+}
+
+async fn list_clips(
+    State(glass): State<Glass>,
+    Query(query): Query<ClipQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        json!({ "clips": glass.list_clip_queue(query.limit.unwrap_or(50))? }),
+    ))
+}
+
+async fn clips_page(State(glass): State<Glass>) -> Result<Html<String>, ApiError> {
+    let clips = glass.list_clip_queue(50)?;
+    let body = render_clip_queue_body(&clips)?;
+    Ok(Html(CLIPS_SHELL.replace("{{BODY}}", &body)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1025,6 +1400,122 @@ fn summarize_agents(posts: &[Post], sessions: &[Session]) -> Vec<AgentSummary> {
     agents
 }
 
+fn render_clip_queue_body(clips: &[ClipQueueItem]) -> Result<String> {
+    let hero = Component::Hero(Hero {
+        title: "Clip review queue".to_string(),
+        summary: text("Marked live-stage moments, packaged with post context and draft captions."),
+        stats: vec![Metric {
+            label: "Queued clips".to_string(),
+            value: clips.len().to_string(),
+        }],
+        image_intent: None,
+    });
+    let columns = vec![
+        ColumnSpec {
+            key: "created".to_string(),
+            label: "Created".to_string(),
+            numeric: true,
+            emphasize: false,
+        },
+        ColumnSpec {
+            key: "caption".to_string(),
+            label: "Draft caption".to_string(),
+            numeric: false,
+            emphasize: true,
+        },
+        ColumnSpec {
+            key: "surface".to_string(),
+            label: "Surface".to_string(),
+            numeric: false,
+            emphasize: false,
+        },
+        ColumnSpec {
+            key: "evidence".to_string(),
+            label: "Evidence".to_string(),
+            numeric: false,
+            emphasize: false,
+        },
+        ColumnSpec {
+            key: "note".to_string(),
+            label: "Note".to_string(),
+            numeric: false,
+            emphasize: false,
+        },
+    ];
+    let rows = clips
+        .iter()
+        .map(|item| {
+            let surface_label = item
+                .context
+                .surface
+                .as_ref()
+                .map(|surface| format!("{} / {}", surface.kind, surface.id))
+                .unwrap_or_else(|| "whole post".to_string());
+            let evidence = item
+                .context
+                .evidence_links
+                .first()
+                .cloned()
+                .unwrap_or_else(|| ClipEvidenceLink {
+                    label: "post".to_string(),
+                    url: format!("/session/{}/p/{}", item.clip.session_id, item.clip.post_id),
+                });
+            Row {
+                cells: vec![
+                    Cell {
+                        column_key: "created".to_string(),
+                        value: CellValue::Text {
+                            text: item.clip.created_at.to_string(),
+                        },
+                    },
+                    Cell {
+                        column_key: "caption".to_string(),
+                        value: CellValue::Text {
+                            text: item.draft_caption.clone(),
+                        },
+                    },
+                    Cell {
+                        column_key: "surface".to_string(),
+                        value: CellValue::Text {
+                            text: surface_label,
+                        },
+                    },
+                    Cell {
+                        column_key: "evidence".to_string(),
+                        value: CellValue::Link {
+                            text: evidence.label,
+                            href: evidence.url,
+                        },
+                    },
+                    Cell {
+                        column_key: "note".to_string(),
+                        value: CellValue::Text {
+                            text: item.clip.note.clone().unwrap_or_else(|| "-".to_string()),
+                        },
+                    },
+                ],
+            }
+        })
+        .collect::<Vec<_>>();
+    let table = Component::Table(Table {
+        heading: "Review candidates".to_string(),
+        columns,
+        rows,
+        empty_note: (clips.is_empty()).then(|| "No clips captured yet.".to_string()),
+        demoted_note: None,
+    });
+    let components = vec![hero, table];
+    validate_layout(&components, &REPORT).map_err(|error| anyhow!(error.to_string()))?;
+    let ctx = RenderContext {
+        now: Utc::now(),
+        cite_href: &|ref_id| format!("#cite-{ref_id}"),
+    };
+    Ok(components
+        .iter()
+        .map(|component| render_component(component, &ctx))
+        .collect())
+}
+
 async fn upload_asset(
     State(glass): State<Glass>,
     headers: HeaderMap,
@@ -1137,6 +1628,10 @@ fn mcp_dispatch(glass: &Glass, request: &Value) -> Result<Value> {
                     .map_err(|error| anyhow!(error))
                     .and_then(|input| glass.publish_post(input))
                     .map(|outcome| json!({ "content": [{ "type": "json", "json": outcome }] })),
+                "capture_clip" => serde_json::from_value::<CaptureClip>(args)
+                    .map_err(|error| anyhow!(error))
+                    .and_then(|input| glass.capture_clip(input))
+                    .map(|item| json!({ "content": [{ "type": "json", "json": item }] })),
                 _ => Err(anyhow!("unknown tool: {name}")),
             }
         }
@@ -1145,21 +1640,45 @@ fn mcp_dispatch(glass: &Glass, request: &Value) -> Result<Value> {
 }
 
 fn mcp_tools() -> Vec<Value> {
-    vec![json!({
-        "name": "publish_post",
-        "description": "Publish or create a Glass post made from ordered typed surfaces.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["title", "surfaces"],
-            "properties": {
-                "session_id": { "type": "string" },
-                "session_title": { "type": "string" },
-                "agent": { "type": "string" },
-                "title": { "type": "string" },
-                "surfaces": { "type": "array" }
+    vec![
+        json!({
+            "name": "publish_post",
+            "description": "Publish or create a Glass post made from ordered typed surfaces.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["title", "surfaces"],
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "session_title": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "title": { "type": "string" },
+                    "surfaces": { "type": "array" }
+                }
             }
-        }
-    })]
+        }),
+        json!({
+            "name": "capture_clip",
+            "description": "Mark an interesting Glass post or surface for the one-way clip review queue.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["session_id", "post_id"],
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "post_id": { "type": "string" },
+                    "surface_id": { "type": "string" },
+                    "surface_index": { "type": "integer", "minimum": 0 },
+                    "range": {
+                        "type": "object",
+                        "properties": {
+                            "start": { "type": "integer", "minimum": 0 },
+                            "end": { "type": "integer", "minimum": 0 }
+                        }
+                    },
+                    "note": { "type": "string" }
+                }
+            }
+        }),
+    ]
 }
 
 fn render_surface_doc(post: &Post, surface: &Surface) -> String {
@@ -1260,6 +1779,46 @@ fn escape_html(raw: &str) -> String {
 
 const SANDBOX_CSP: &str = "sandbox allow-scripts allow-forms allow-popups; default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src https: data: blob:; media-src https: data: blob:";
 
+const CLIPS_SHELL: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glass — Clips</title>
+<link rel="stylesheet" href="/aesthetic.css">
+<script>
+try {
+  var m = localStorage.getItem('ae-mode');
+  if (m === 'dark' || m === 'light') {
+    document.documentElement.classList.add(m);
+    document.documentElement.style.colorScheme = m;
+  }
+} catch (e) {}
+</script>
+<style>
+.clips-shell { max-width: 960px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
+</style>
+</head>
+<body>
+<div class="ae-shell">
+  <aside class="ae-rail">
+    <a class="ae-logo ae-logo-compact" href="/">
+      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
+      <span class="ae-name">Glass</span>
+    </a>
+    <p class="ae-h">Review</p>
+    <a href="/clips" aria-current="page">Clips</a>
+    <a href="/rep1">Fleet report</a>
+    <a href="/backlog/glass">Backlog</a>
+    <a href="/">Raw live feed</a>
+  </aside>
+  <main class="ae-desk">
+    <div class="clips-shell">{{BODY}}</div>
+  </main>
+</div>
+</body>
+</html>"#;
+
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -1353,6 +1912,12 @@ For curl-only agents, publish a typed post with:
   curl -s -X POST ${GLASS_URL:-http://127.0.0.1:9041}/api/posts \
     -H 'content-type: application/json' \
     --data '{"agent":"codex","sessionTitle":"Build lane","title":"Status","surfaces":[{"kind":"markdown","markdown":"Ready."}]}'
+
+Mark an interesting moment for review with:
+
+  curl -s -X POST ${GLASS_URL:-http://127.0.0.1:9041}/api/clips \
+    -H 'content-type: application/json' \
+    --data '{"session_id":"ses-id","post_id":"post-id","surface_index":0,"note":"Worth reviewing."}'
 "#;
 
 const AGENT_HOWTO: &str = r#"# Glass agent how-to
@@ -1375,6 +1940,11 @@ chip (`{"kind":"metric","label":"tests","value":"42 passed"}`).
 Glass is ONE-WAY: the operator watches the stage, but there is no reply
 channel back to the producing agent. Do not poll for or expect feedback;
 communication with the operator happens somewhere else.
+
+Clip review is also one-way. `POST /api/clips` or the MCP `capture_clip` tool
+marks a post/surface moment into `/clips` and `/api/clips` with the referenced
+session/post context, evidence links, and a deterministic draft caption. It
+does not notify or message the producing agent.
 "#;
 
 pub async fn run_doctor(config: DoctorConfig) -> Result<DoctorReport> {
@@ -1568,6 +2138,8 @@ try {
     <p class="ae-h">Agents</p>
     <a href="/" id="rail-all">All agents</a>
     <div id="rail-agents"></div>
+    <p class="ae-h">Review</p>
+    <a href="/clips">Clips</a>
     <div class="ae-rail-foot">
       <button class="ae-mode" aria-label="toggle color mode">
         <svg class="ae-icon ae-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>

@@ -157,6 +157,7 @@ async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let tools = value["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| tool["name"] == "publish_post"));
+    assert!(tools.iter().any(|tool| tool["name"] == "capture_clip"));
     assert!(
         !tools.iter().any(|tool| tool["name"] == "wait_for_feedback"),
         "glass-912 deleted the feedback tool: {tools:?}"
@@ -175,6 +176,108 @@ async fn mcp_tool_list_and_setup_docs_expose_agent_onboarding() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("/agent-howto"));
     assert!(text.contains("/mcp"));
+}
+
+#[tokio::test]
+async fn clip_capture_records_a_review_queue_item_with_context_and_caption() {
+    let glass = Glass::memory().expect("memory store");
+    let session = glass
+        .create_session(NewSession {
+            agent: "codex-lane".into(),
+            title: "clip lane".into(),
+            cwd: Some("/tmp/glass-clip".into()),
+        })
+        .expect("session");
+    let post = glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id.clone()),
+            session_title: None,
+            agent: None,
+            title: "surprising output".into(),
+            surfaces: vec![
+                Surface::new(SurfaceKind::Markdown, json!({"markdown": "this mattered"}))
+                    .expect("surface"),
+            ],
+        })
+        .expect("publish")
+        .post;
+    let app = app_router(glass);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/clips")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": session.id,
+                        "post_id": post.id,
+                        "surface_index": 0,
+                        "range": { "start": 0, "end": 30 },
+                        "note": "clip this for review"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("clip response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let captured: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(captured["clip"]["post_version"], 1);
+    assert_eq!(captured["clip"]["surface_index"], 0);
+    assert_eq!(captured["context"]["session"]["agent"], "codex-lane");
+    assert_eq!(captured["context"]["post"]["title"], "surprising output");
+    assert_eq!(captured["context"]["surface"]["kind"], "markdown");
+    assert!(
+        captured["draft_caption"]
+            .as_str()
+            .unwrap()
+            .contains("clip this for review")
+    );
+    assert!(
+        captured["context"]["evidence_links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link["url"].as_str().unwrap().starts_with("/session/"))
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/clips?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("queue response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let queue: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let clips = queue["clips"].as_array().expect("clips");
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0]["clip"]["note"], "clip this for review");
+    assert_eq!(clips[0]["context"]["surface"]["id"], "surface-1");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/clips")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("clips page response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Clip review queue"));
+    assert!(html.contains("clip this for review"));
 }
 
 #[tokio::test]
