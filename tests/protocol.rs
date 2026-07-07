@@ -538,11 +538,27 @@ async fn viewer_carries_the_cross_repo_sanctum_home_affordance() {
         "viewer must carry the data-sanctum-home marker other Sanctum tooling scans for"
     );
     assert!(
-        html.contains(r#"href="https://bastion.tail5f5eb4.ts.net/""#),
-        "the affordance must point at the actual portal root, not a relative path \
-         (bastion-917 audit: unlike bastion's own same-origin injection, Glass is a \
-         cross-origin destination)"
+        !html.contains("{{SANCTUM_URL}}"),
+        "the SANCTUM_URL placeholder must be substituted, never leaked into served HTML"
     );
+    assert!(
+        html.contains(r#"href="/""#),
+        "with no GLASS_SANCTUM_URL configured the affordance falls back to an inert \
+         same-origin link rather than a hardcoded personal tailnet host (glass-915: this \
+         repo is public and forkable); deployments behind a real Sanctum portal set \
+         GLASS_SANCTUM_URL to the absolute portal root so cross-origin destinations still \
+         resolve correctly (bastion-917 audit: unlike bastion's own same-origin injection, \
+         Glass is a cross-origin destination)"
+    );
+}
+
+#[test]
+fn sanctum_url_from_honors_configured_override_and_falls_back_to_same_origin() {
+    assert_eq!(
+        glass::sanctum_url_from(Some("https://portal.example/".to_string())),
+        "https://portal.example/"
+    );
+    assert_eq!(glass::sanctum_url_from(None), "/");
 }
 
 fn temp_db_path(prefix: &str) -> PathBuf {

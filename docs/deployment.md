@@ -14,7 +14,7 @@ The doctor must succeed before the service is called live.
 Build the binary from the checkout that will be supervised:
 
 ```sh
-cd /Users/phaedrus/Development/glass
+cd $HOME/Development/glass
 cargo build --release
 mkdir -p .glass-live
 ```
@@ -22,10 +22,14 @@ mkdir -p .glass-live
 The local service command is:
 
 ```sh
-/Users/phaedrus/Development/glass/target/release/glass serve \
+$HOME/Development/glass/target/release/glass serve \
   --bind 127.0.0.1:9040 \
-  --db /Users/phaedrus/Development/glass/.glass-live/glass.db
+  --db $HOME/Development/glass/.glass-live/glass.db
 ```
+
+Set `GLASS_SANCTUM_URL` to the portal root if this deployment sits behind a
+Sanctum portal (see the viewer's cross-repo home affordance, glass-915); left
+unset, the affordance falls back to an inert same-origin link.
 
 Starting fresh on posts is acceptable for the campaign cutover when migration is
 not explicitly required. If preserving an existing native Glass stage, reuse the
@@ -35,16 +39,16 @@ the schemas are different.
 ## Launchd
 
 The workstation supervision surface is a user LaunchAgent. The label for native
-Glass is `com.phaedrus.glass`.
+Glass is `com.<user>.glass` (substitute your own reverse-DNS namespace).
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.phaedrus.glass</string>
+  <key>Label</key><string>com.&lt;user&gt;.glass</string>
   <key>ProgramArguments</key><array>
     <string>/bin/zsh</string><string>-lc</string>
-    <string>cd /Users/phaedrus/Development/glass &amp;&amp; exec /Users/phaedrus/Development/glass/target/release/glass serve --bind 127.0.0.1:9040 --db /Users/phaedrus/Development/glass/.glass-live/glass.db</string>
+    <string>cd $HOME/Development/glass &amp;&amp; exec $HOME/Development/glass/target/release/glass serve --bind 127.0.0.1:9040 --db $HOME/Development/glass/.glass-live/glass.db</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -56,17 +60,17 @@ Glass is `com.phaedrus.glass`.
 Install and start:
 
 ```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.phaedrus.glass.plist
-launchctl kickstart -k gui/$(id -u)/com.phaedrus.glass
-launchctl list | rg 'com.phaedrus.glass'
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.<user>.glass.plist
+launchctl kickstart -k gui/$(id -u)/com.<user>.glass
+launchctl list | rg 'com.<user>.glass'
 ```
 
 ## Tailnet Slot
 
-The campaign slot is:
+The campaign slot is a tailnet HTTPS hostname of your choosing, e.g.:
 
 ```text
-https://serenity.tail5f5eb4.ts.net:9040
+https://<your-tailnet-host>:9040
 ```
 
 It should proxy to:
@@ -82,12 +86,12 @@ tailscale serve --bg --https 9040 http://127.0.0.1:9040
 tailscale serve status --json
 ```
 
-The status JSON must show `serenity.tail5f5eb4.ts.net:9040` with `/` proxied to
+The status JSON must show `<your-tailnet-host>:9040` with `/` proxied to
 `http://127.0.0.1:9040`.
 
 ## Cutover From Interim Sideshow
 
-The interim deployment used `com.phaedrus.sideshow` with `npx sideshow serve
+The interim deployment used `com.<user>.sideshow` with `npx sideshow serve
 --port 9040`. A Glass cutover is allowed for campaign lanes only when all of the
 following are true:
 
@@ -103,12 +107,12 @@ following are true:
 Cutover sequence:
 
 ```sh
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.phaedrus.sideshow.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.phaedrus.glass.plist
-launchctl kickstart -k gui/$(id -u)/com.phaedrus.glass
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.<user>.sideshow.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.<user>.glass.plist
+launchctl kickstart -k gui/$(id -u)/com.<user>.glass
 tailscale serve --bg --https 9040 http://127.0.0.1:9040
-glass doctor --url http://127.0.0.1:9040 --db /Users/phaedrus/Development/glass/.glass-live/glass.db
-curl -sS -I https://serenity.tail5f5eb4.ts.net:9040/
+glass doctor --url http://127.0.0.1:9040 --db $HOME/Development/glass/.glass-live/glass.db
+curl -sS -I https://<your-tailnet-host>:9040/
 ```
 
 ## Rollback
@@ -116,9 +120,9 @@ curl -sS -I https://serenity.tail5f5eb4.ts.net:9040/
 Rollback restores the old launchd owner of port `9040`:
 
 ```sh
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.phaedrus.glass.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.phaedrus.sideshow.plist
-launchctl kickstart -k gui/$(id -u)/com.phaedrus.sideshow
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.<user>.glass.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.<user>.sideshow.plist
+launchctl kickstart -k gui/$(id -u)/com.<user>.sideshow
 tailscale serve --bg --https 9040 http://127.0.0.1:9040
 ```
 
