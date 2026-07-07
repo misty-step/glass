@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+mod rep1;
 mod window_report;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -768,6 +769,8 @@ pub fn app_router(glass: Glass) -> Router {
             "/api/window-report/{window}",
             get(window_report::window_report),
         )
+        .route("/rep1", get(rep1::rep1_shell))
+        .route("/api/rep1/{window}", get(rep1::rep1_report))
         .with_state(glass)
 }
 

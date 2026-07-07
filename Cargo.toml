@@ -7,6 +7,11 @@ edition = "2024"
 anyhow = "1"
 async-stream = "0.3"
 axum = "0.8"
+chrono = "0.4"
+# glass-913 (REP-1): the shared two-tier report component catalog, pinned to
+# the exact rev fleet-retro consumes (aesthetic-926's own convention) so
+# Glass never grows a second hand-rolled report renderer.
+glance-catalog = { git = "https://github.com/misty-step/glance", rev = "b670c63560ef5ae55f72f08549f5875e6ca3fe51" }
 hex = "0.4"
 http-body-util = "0.1"
 mime = "0.3"

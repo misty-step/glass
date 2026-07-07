@@ -616,6 +616,62 @@ async fn window_report_streams_a_skeleton_before_the_shelf_fetch_resolves() {
     );
 }
 
+#[tokio::test]
+async fn rep1_shell_serves_a_server_rendered_tab_bar_with_two_disabled_tabs() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(Request::builder().uri("/rep1").body(Body::empty()).unwrap())
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        !html.contains("{{TABS_HTML}}"),
+        "the tab-bar placeholder must be substituted server-side"
+    );
+    assert!(html.contains(r#"data-win="24h""#) && html.contains(r#"data-win="7d""#));
+    assert!(
+        html.contains(r#"data-win="30m" disabled"#) && html.contains(r#"data-win="1h" disabled"#),
+        "30m/1h need glass-919's on-demand synthesis and must render visibly disabled: {html}"
+    );
+}
+
+#[tokio::test]
+async fn rep1_report_rejects_windows_outside_the_locked_lab3_tab_set() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/rep1/monthly")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rep1_report_streams_a_glass_919_pending_error_for_non_live_windows() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/rep1/30m")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("event: skeleton"));
+    assert!(
+        text.contains("event: error") && text.contains("glass-919"),
+        "30m has no shelf window to map to; it must fail loudly naming glass-919, not \
+         silently render nothing: {text}"
+    );
+}
+
 fn temp_db_path(prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

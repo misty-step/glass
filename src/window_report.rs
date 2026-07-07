@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 /// fleet-retro currently only produces these two windows on a schedule.
 /// Arbitrary/custom windows need an on-demand synthesis service that does
 /// not exist yet (glass-919).
-const SUPPORTED_WINDOWS: [&str; 2] = ["daily", "weekly"];
+pub(crate) const SUPPORTED_WINDOWS: [&str; 2] = ["daily", "weekly"];
 
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -130,6 +130,23 @@ async fn fetch_from_shelf(window: &str) -> Result<Value, String> {
         .json::<Value>()
         .await
         .map_err(|err| format!("parse {url}: {err}"))
+}
+
+/// Fetch (or return the cached copy of) a window's fleet-retro shelf spec.
+/// Shared by `window_report` and glass-913's REP-1 renderer (`crate::rep1`)
+/// so both go through the same coalescing TTL cache rather than each
+/// maintaining its own.
+pub(crate) async fn fetch_window(window: &str, scope: &str) -> (bool, Result<Value, String>) {
+    let cache = global_cache();
+    let (status, outcome) = get_or_fetch(&cache, window, scope, CACHE_TTL, || {
+        fetch_from_shelf(window)
+    })
+    .await;
+    let is_hit = status == CacheStatus::Hit;
+    match outcome.as_ref() {
+        FetchOutcome::Ok(value) => (is_hit, Ok(value.clone())),
+        FetchOutcome::Err(message) => (is_hit, Err(message.clone())),
+    }
 }
 
 #[derive(Debug, Deserialize)]
