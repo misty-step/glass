@@ -25,6 +25,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::{sanctum_url, shell};
+
 fn powder_base_url() -> Option<String> {
     std::env::var("GLASS_POWDER_API_BASE_URL")
         .ok()
@@ -147,23 +149,35 @@ struct TriageAnnotation {
 }
 
 async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
+    fetch_awaiting_with_reporting(true).await
+}
+
+async fn fetch_awaiting_silent() -> Result<Vec<AwaitingItem>, String> {
+    fetch_awaiting_with_reporting(false).await
+}
+
+async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<Vec<AwaitingItem>, String> {
     let base = match powder_base_url() {
         Some(base) => base,
         None => {
-            crate::canary::report_error(
-                "glass.needs_you.fetch.failed",
-                "route=/api/needs-you upstream=powder error_kind=missing_base_url",
-            );
+            if report_errors {
+                crate::canary::report_error(
+                    "glass.needs_you.fetch.failed",
+                    "route=/api/needs-you upstream=powder error_kind=missing_base_url",
+                );
+            }
             return Err("GLASS_POWDER_API_BASE_URL is not configured".to_string());
         }
     };
     let key = match powder_api_key() {
         Some(key) => key,
         None => {
-            crate::canary::report_error(
-                "glass.needs_you.fetch.failed",
-                "route=/api/needs-you upstream=powder error_kind=missing_api_key",
-            );
+            if report_errors {
+                crate::canary::report_error(
+                    "glass.needs_you.fetch.failed",
+                    "route=/api/needs-you upstream=powder error_kind=missing_api_key",
+                );
+            }
             return Err("GLASS_POWDER_API_KEY is not configured".to_string());
         }
     };
@@ -174,20 +188,24 @@ async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
         .send()
         .await
         .map_err(|err| {
-            crate::canary::report_error(
-                "glass.needs_you.fetch.failed",
-                "route=/api/needs-you upstream=powder error_kind=transport",
-            );
+            if report_errors {
+                crate::canary::report_error(
+                    "glass.needs_you.fetch.failed",
+                    "route=/api/needs-you upstream=powder error_kind=transport",
+                );
+            }
             format!("fetch {url}: {err}")
         })?;
     if !response.status().is_success() {
-        crate::canary::report_error(
-            "glass.needs_you.fetch.failed",
-            &format!(
-                "route=/api/needs-you upstream=powder upstream_status={} error_kind=upstream_status",
-                response.status().as_u16()
-            ),
-        );
+        if report_errors {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                &format!(
+                    "route=/api/needs-you upstream=powder upstream_status={} error_kind=upstream_status",
+                    response.status().as_u16()
+                ),
+            );
+        }
         return Err(format!(
             "fetch {url}: upstream returned {}",
             response.status()
@@ -198,10 +216,12 @@ async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
         .await
         .map(|body| body.awaiting)
         .map_err(|err| {
-            crate::canary::report_error(
-                "glass.needs_you.fetch.failed",
-                "route=/api/needs-you upstream=powder error_kind=parse",
-            );
+            if report_errors {
+                crate::canary::report_error(
+                    "glass.needs_you.fetch.failed",
+                    "route=/api/needs-you upstream=powder error_kind=parse",
+                );
+            }
             format!("parse {url}: {err}")
         })?;
     sort_awaiting(&mut items);
@@ -560,6 +580,14 @@ fn render_needs_you_with_board_url(
     out
 }
 
+pub(crate) async fn awaiting_input_count() -> Option<usize> {
+    tokio::time::timeout(Duration::from_millis(750), fetch_awaiting_silent())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|items| items.len())
+}
+
 /// `GET /api/needs-you`. Streams a skeleton event, then a full event with
 /// pre-rendered rail HTML: kind-grouped rows sourced from Powder's
 /// `runs/awaiting-input` (no repo filter -- every repo's asks land here,
@@ -679,23 +707,7 @@ pub async fn answer(
     Ok(AxumJson(AnswerResponse { ok: true }))
 }
 
-const NEEDS_YOU_SHELL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass — Needs You</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  }
-} catch (e) {}
-</script>
-<style>
+const NEEDS_YOU_STYLE: &str = r#"
 .ny-shell { max-width: 760px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
 .ny-group { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ae-ink-muted); margin: var(--ae-space-6) 0 var(--ae-space-3); }
 .ny-row { display: flex; align-items: center; gap: var(--ae-space-3); width: 100%; text-align: left; padding: var(--ae-space-3) var(--ae-space-4); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); cursor: pointer; margin-bottom: var(--ae-space-2); }
@@ -719,33 +731,20 @@ try {
 .ny-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
 #ny-dialog { border: 1px solid var(--ae-line); padding: var(--ae-space-6); max-width: 640px; width: 90vw; }
 #ny-dialog::backdrop { background: rgba(0,0,0,0.4); }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <p class="ae-h">Report</p>
-    <a href="/rep1">Fleet report</a>
-    <a href="/backlog/glass">Backlog</a>
-    <a href="/needs-you" id="ny-nav-active">Needs You</a>
-    <a href="/">Raw live feed</a>
-  </aside>
-  <main class="ae-desk">
+"#;
+
+const NEEDS_YOU_BODY: &str = r#"
     <div class="ny-shell">
       <h1 class="ae-strong">Needs You</h1>
       <div id="ny-body"><p class="ny-loading">Loading&hellip;</p></div>
     </div>
-  </main>
-</div>
 <dialog id="ny-dialog">
   <div id="ny-dialog-body"></div>
   <button type="button" data-dialog-close class="ae-button ae-button-compact">Close</button>
 </dialog>
-<script>
+"#;
+
+const NEEDS_YOU_SCRIPT: &str = r#"
 (function(){
   var bodyEl = document.getElementById('ny-body');
   var dialog = document.getElementById('ny-dialog');
@@ -867,12 +866,19 @@ try {
 
   load();
 })();
-</script>
-</body>
-</html>"#;
+"#;
 
 pub async fn needs_you_shell() -> impl IntoResponse {
-    axum::response::Html(NEEDS_YOU_SHELL.to_string())
+    let count = awaiting_input_count().await;
+    axum::response::Html(shell::render_shell(shell::Shell {
+        title: "Glass - Needs You",
+        active: Some(shell::Place::NeedsYou),
+        needs_you_count: count,
+        sanctum_url: &sanctum_url(),
+        styles: NEEDS_YOU_STYLE,
+        body: NEEDS_YOU_BODY,
+        scripts: NEEDS_YOU_SCRIPT,
+    }))
 }
 
 #[cfg(test)]

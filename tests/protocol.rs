@@ -13,6 +13,50 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
+fn assert_shared_rail(html: &str, active_href: Option<&str>) {
+    assert_eq!(
+        html.matches(r#"<aside class="ae-rail" aria-label="Glass places">"#)
+            .count(),
+        1,
+        "every human page must render exactly one shared rail: {html}"
+    );
+    assert!(html.contains(r#"<p class="ae-h">PLACES</p>"#));
+    assert!(
+        html.contains(r#"<a href="/">Now</a>"#)
+            || html.contains(r#"<a href="/" aria-current="page">Now</a>"#)
+    );
+    assert!(
+        html.contains(r#"<a href="/needs-you">Needs you</a>"#)
+            || html.contains(r#"<a href="/needs-you" aria-current="page">Needs you</a>"#),
+        "when Powder is unavailable, the needs-you place must degrade to no count: {html}"
+    );
+    assert!(
+        html.contains(r#"<a href="/rep1">Reports</a>"#)
+            || html.contains(r#"<a href="/rep1" aria-current="page">Reports</a>"#)
+    );
+    assert!(
+        html.contains(r#"<a href="/clips">Clips</a>"#)
+            || html.contains(r#"<a href="/clips" aria-current="page">Clips</a>"#)
+    );
+    assert!(html.contains("data-sanctum-home"));
+    assert!(html.contains(r#"<a href="/setup">Wire an agent</a>"#));
+    assert!(html.contains(r#"<button class="ae-mode" type="button""#));
+
+    let current_count = html.matches(r#"aria-current="page""#).count();
+    if let Some(href) = active_href {
+        assert!(
+            html.contains(&format!(r#"<a href="{href}" aria-current="page">"#)),
+            "active place {href} is missing aria-current: {html}"
+        );
+        assert_eq!(current_count, 1, "only one place may be active: {html}");
+    } else {
+        assert_eq!(
+            current_count, 0,
+            "routes outside declared places should not mark a rail place active: {html}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn surface_kinds_match_the_frozen_sideshow_contract_plus_metric() {
     assert_eq!(
@@ -281,6 +325,7 @@ async fn clip_capture_records_a_review_queue_item_with_context_and_caption() {
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("Clip review queue"));
     assert!(html.contains("clip this for review"));
+    assert_shared_rail(&html, Some("/clips"));
 }
 
 #[tokio::test]
@@ -751,8 +796,8 @@ async fn recent_posts_agent_filter_scopes_posts_but_not_the_roster() {
     assert_eq!(posts.len(), 1, "agent filter must scope posts: {posts:?}");
     assert_eq!(posts[0]["title"], "alpha status");
 
-    // The rail needs the full roster regardless of which agent's feed is
-    // open, so a viewer can navigate to any other agent from any view.
+    // The viewer needs the full roster regardless of which agent's feed is
+    // open, so the wall/drill-down state can stay in sync from any view.
     let agents = value["agents"].as_array().expect("agents");
     assert!(agents.iter().any(|agent| agent["agent"] == "alpha"));
     assert!(agents.iter().any(|agent| agent["agent"] == "beta"));
@@ -791,6 +836,7 @@ async fn viewer_carries_the_cross_repo_sanctum_home_affordance() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_shared_rail(&html, Some("/"));
     assert!(
         html.contains("data-sanctum-home"),
         "viewer must carry the data-sanctum-home marker other Sanctum tooling scans for"
@@ -891,6 +937,7 @@ async fn rep1_shell_serves_a_server_rendered_tab_bar_with_two_disabled_tabs() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_shared_rail(&html, Some("/rep1"));
     assert!(
         !html.contains("{{TABS_HTML}}"),
         "the tab-bar placeholder must be substituted server-side"
@@ -952,6 +999,7 @@ async fn backlog_shell_echoes_the_requested_repo_into_the_form_input() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_shared_rail(&html, None);
     assert!(!html.contains("{{REPO}}"));
     assert!(html.contains(r#"value="glass""#));
 }
@@ -996,6 +1044,7 @@ async fn review_sample_shell_renders_the_three_cited_context_layers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
 
+    assert_shared_rail(&html, None);
     assert!(html.contains("Narrated review"));
     assert!(html.contains("Change context"));
     assert!(html.contains("src/lib.rs:777"));
@@ -1024,6 +1073,7 @@ async fn needs_you_shell_serves_the_rail_page() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_shared_rail(&html, Some("/needs-you"));
     assert!(html.contains("Needs You"));
     assert!(
         html.contains("ny-dialog"),

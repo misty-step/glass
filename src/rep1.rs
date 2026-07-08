@@ -29,6 +29,8 @@ use glance_catalog::structural::{Disclosure, Hero, Narrative, Timeline, Timeline
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::{needs_you, sanctum_url, shell};
+
 /// The four windows the operator's lab-3 design locked. Only the two
 /// fleet-retro actually schedules resolve to real data today.
 struct WindowTab {
@@ -362,23 +364,7 @@ pub async fn rep1_report(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-const REP1_SHELL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass — Fleet report</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  }
-} catch (e) {}
-</script>
-<style>
+const REP1_STYLE: &str = r#"
 .rep1-shell { max-width: 720px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
 .rep1-tabs { display: flex; gap: var(--ae-space-2); margin-bottom: var(--ae-space-5); flex-wrap: wrap; }
 .rep1-tab { padding: var(--ae-space-2) var(--ae-space-4); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); font-family: var(--ae-font-mono); font-size: 13px; cursor: pointer; }
@@ -387,29 +373,18 @@ try {
 .rep1-sub { color: var(--ae-ink-muted); font-size: 13px; margin-bottom: var(--ae-space-5); }
 .rep1-raw-link { display: inline-block; margin-top: var(--ae-space-6); font-size: 13px; }
 .rep1-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <p class="ae-h">Report</p>
-    <a href="/rep1" id="rep1-nav-active">Fleet report</a>
-    <a href="/">Raw live feed</a>
-  </aside>
-  <main class="ae-desk">
+"#;
+
+const REP1_BODY: &str = r#"
     <div class="rep1-shell">
       <div class="rep1-tabs" id="rep1-tabs">{{TABS_HTML}}</div>
       <p class="rep1-sub" id="rep1-sub">Synthesized from the fleet-retro pack (git, Powder, bb, feed, receipts, moments) + canary + landmark.</p>
       <div id="rep1-body"><p class="rep1-loading">Loading&hellip;</p></div>
       <a class="rep1-raw-link" href="/">View raw per-agent feed &rarr;</a>
     </div>
-  </main>
-</div>
-<script>
+"#;
+
+const REP1_SCRIPT: &str = r#"
 (function(){
   // The tab bar is server-rendered from WINDOW_TABS (single source of
   // truth for id/label/live-state) -- this script only wires clicks and
@@ -455,13 +430,19 @@ try {
   wireTabs();
   load('24h');
 })();
-</script>
-</body>
-</html>"#;
+"#;
 
 pub async fn rep1_shell() -> impl IntoResponse {
-    let html = REP1_SHELL.replace("{{TABS_HTML}}", &render_tabs_html("24h"));
-    axum::response::Html(html)
+    let body = REP1_BODY.replace("{{TABS_HTML}}", &render_tabs_html("24h"));
+    axum::response::Html(shell::render_shell(shell::Shell {
+        title: "Glass - Fleet report",
+        active: Some(shell::Place::Reports),
+        needs_you_count: needs_you::awaiting_input_count().await,
+        sanctum_url: &sanctum_url(),
+        styles: REP1_STYLE,
+        body: &body,
+        scripts: REP1_SCRIPT,
+    }))
 }
 
 #[cfg(test)]
