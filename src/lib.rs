@@ -1465,12 +1465,13 @@ pub fn start_standing_digest_scheduler(glass: Glass) {
 }
 
 async fn viewer() -> Html<String> {
+    let styles = format!("{}{}", VIEWER_STYLE, reports::reports_styles());
     Html(shell::render_shell(shell::Shell {
         title: "Glass",
         active: Some(shell::Place::Now),
         needs_you_count: needs_you::awaiting_input_count().await,
         sanctum_url: &sanctum_url(),
-        styles: VIEWER_STYLE,
+        styles: &styles,
         body: VIEWER_BODY,
         scripts: VIEWER_SCRIPT,
     }))
@@ -1612,6 +1613,9 @@ struct RecentQuery {
 #[derive(Debug, Deserialize)]
 struct FeedQuery {
     limit: Option<usize>,
+    agent: Option<String>,
+    #[serde(alias = "sessionId")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1876,7 +1880,9 @@ async fn recent_feed(
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = query.limit.unwrap_or(80).clamp(1, 100);
-    let raw_posts = glass.list_recent_posts(limit)?;
+    let scoped = query.agent.is_some() || query.session_id.is_some();
+    let fetch_limit = if scoped { 100 } else { limit };
+    let raw_posts = glass.list_recent_posts(fetch_limit)?;
     let raw_sessions = glass.list_sessions()?;
     let raw_session_by_id = raw_sessions
         .iter()
@@ -1908,11 +1914,36 @@ async fn recent_feed(
         })
         .collect::<Vec<_>>();
 
-    let mut events = posts
+    let view_posts = posts
+        .iter()
+        .filter(|post| {
+            let session_ok = query
+                .session_id
+                .as_deref()
+                .is_none_or(|id| post.session_id == id);
+            let agent_ok = query.agent.as_deref().is_none_or(|agent| {
+                session_by_id
+                    .get(post.session_id.as_str())
+                    .is_some_and(|session| session.agent == agent)
+            });
+            session_ok && agent_ok
+        })
+        .collect::<Vec<_>>();
+    let mut events = view_posts
         .iter()
         .map(|post| post_feed_event(post, session_by_id.get(post.session_id.as_str()).copied()))
         .collect::<Vec<_>>();
-    let landmark = fetch_landmark_feed(limit).await;
+    let landmark = if scoped {
+        LandmarkFeed {
+            status: LandmarkStatus {
+                status: "scoped",
+                message: None,
+            },
+            events: Vec::new(),
+        }
+    } else {
+        fetch_landmark_feed(limit).await
+    };
     events.extend(landmark.events);
     events.sort_by(|left, right| {
         right
@@ -1924,7 +1955,7 @@ async fn recent_feed(
 
     Ok(Json(json!({
         "events": events,
-        "posts": posts,
+        "posts": view_posts,
         "sessions": session_views,
         "agents": agents,
         "feedKinds": FEED_KINDS,
@@ -3256,6 +3287,20 @@ const VIEWER_STYLE: &str = r#"
 .glass-wire-kind { display: inline-flex; align-self: center; color: var(--ae-ink-muted); }
 .glass-wire-agent { color: var(--ae-ink-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .glass-wire-title { color: var(--ae-ink); min-width: 0; overflow-wrap: anywhere; }
+.glass-agent-page { display: grid; gap: var(--ae-space-6); }
+.glass-agent-page[hidden] { display: none; }
+.glass-agent-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--ae-space-5); padding-bottom: var(--ae-space-5); border-bottom: 1px solid var(--ae-line); }
+.glass-agent-name { margin: 0.1em 0 0; font-family: var(--ae-font-mono); font-size: clamp(1.7rem, 4vw, 3.6rem); line-height: 1; font-weight: var(--ae-w-black); letter-spacing: 0; overflow-wrap: anywhere; }
+.glass-agent-state { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 0.55em; min-width: 0; }
+.glass-agent-state .ae-icon { align-self: center; }
+.glass-agent-state-line { font-family: var(--ae-font-mono); font-size: 13px; color: var(--ae-ink-muted); }
+.glass-agent-tabs { margin: 0; }
+.glass-agent-tabs [role="tab"] { cursor: pointer; }
+.glass-agent-pane[hidden] { display: none; }
+.glass-agent-pane { min-width: 0; }
+.glass-agent-report-ask { padding-bottom: var(--ae-space-4); margin-bottom: var(--ae-space-5); }
+.glass-agent-locked-slot { border-bottom: 1px solid var(--ae-line); font-weight: var(--ae-w-medium); }
+.glass-agent-report-result:empty { min-height: 10rem; border: 1px dashed var(--ae-line); }
 .glass-feed-meta { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); }
 .glass-feed-links { display: flex; flex-wrap: wrap; gap: var(--ae-space-2); padding: 0 var(--ae-space-5) var(--ae-space-4); }
 .glass-feed-link { border: 1px solid var(--ae-line); padding: 2px 8px; color: var(--ae-ink-muted); text-decoration: none; font-size: 12px; }
@@ -3282,6 +3327,8 @@ const VIEWER_STYLE: &str = r#"
   .glass-now-stats { margin-bottom: 1.6em; }
   .glass-now-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .glass-now-trail { justify-self: start; }
+  .glass-agent-head { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .glass-agent-state { justify-content: flex-start; }
   .glass-wire-tape-row { grid-template-columns: 4.8em 1.3em minmax(0, 1fr); }
   .glass-wire-title { grid-column: 1 / -1; padding-left: calc(6.1em + var(--ae-space-3)); }
   .glass-feed-links { padding: 0; }
@@ -3307,6 +3354,35 @@ const VIEWER_BODY: &str = r#"
     <section id="wire-section" class="glass-now-section" aria-label="The wire">
       <p class="ae-h">THE WIRE · TAPE</p>
       <div id="feed" class="glass-wire" aria-label="Ambient evidence feed"></div>
+    </section>
+    <section id="agent-page" class="glass-agent-page" aria-label="Agent detail" hidden>
+      <div id="agent-state-head" class="glass-agent-head"></div>
+      <div class="ae-tabs glass-agent-tabs" role="tablist" aria-label="Agent views">
+        <button type="button" role="tab" id="agent-tab-wire" aria-controls="agent-panel-wire" aria-selected="true" data-agent-tab="wire">Wire</button>
+        <button type="button" role="tab" id="agent-tab-report" aria-controls="agent-panel-report" aria-selected="false" data-agent-tab="report">Report</button>
+      </div>
+      <section id="agent-panel-wire" class="glass-agent-pane" role="tabpanel" aria-labelledby="agent-tab-wire">
+        <div id="agent-wire-feed" class="glass-wire" aria-label="Agent-scoped wire"></div>
+      </section>
+      <section id="agent-panel-report" class="glass-agent-pane" role="tabpanel" aria-labelledby="agent-tab-report" hidden>
+        <section class="reports-ask glass-agent-report-ask" aria-labelledby="agent-report-title">
+          <p class="ae-plate-cap" id="agent-report-title">REPORT QUERY</p>
+          <p class="reports-sentence">
+            <span>Show me</span>
+            <span class="glass-agent-locked-slot" id="agent-report-scope"></span>
+            <span>over</span>
+            <select class="reports-slot" id="agent-report-window" aria-label="window">
+              <option value="past-hour">the past hour</option>
+              <option value="past-24h" selected>the past 24h</option>
+              <option value="past-week">the past week</option>
+              <option value="past-month">the past month</option>
+            </select>
+            <button class="ae-button ae-button-compact" id="agent-report-run" type="button">Run</button>
+          </p>
+          <p class="reports-cache-line"><span id="agent-report-status" role="status"></span><button class="reports-regenerate" id="agent-report-regenerate" type="button" hidden>regenerate</button></p>
+        </section>
+        <section class="reports-result glass-agent-report-result" id="agent-report-result" aria-live="polite"></section>
+      </section>
     </section>
     <section id="posts" aria-label="Status feed"><p class="glass-empty">No live surfaces yet.</p></section>
 <dialog id="feed-dialog" class="ae-dialog">
@@ -3335,6 +3411,7 @@ let currentFeedEvents = new Map();
 let lastPayload = '';
 let currentNowCards = [];
 let nowSort = 'attention';
+let agentActiveTab = 'wire';
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function ambient() { return !view.agent && !view.session; }
@@ -3346,9 +3423,24 @@ function catFor(agent) {
   return hash % 8;
 }
 function fetchUrl() {
-  if (view.agent) return `/api/posts/recent?agent=${encodeURIComponent(view.agent)}`;
   if (view.session) return `/api/posts/recent?sessionId=${encodeURIComponent(view.session)}`;
   return '/api/now';
+}
+
+async function fetchData() {
+  if (!view.agent) {
+    const response = await fetch(fetchUrl());
+    return await response.json();
+  }
+  const agent = encodeURIComponent(view.agent);
+  const [nowResponse, feedResponse] = await Promise.all([
+    fetch('/api/now'),
+    fetch(`/api/feed/recent?agent=${agent}&limit=100`),
+  ]);
+  return {
+    now: await nowResponse.json(),
+    feed: await feedResponse.json(),
+  };
 }
 
 function safeHref(url) {
@@ -3618,6 +3710,142 @@ function renderWire(host, events, landmark) {
   });
 }
 
+function agentTabFromHash() {
+  return window.location.hash === '#report' ? 'report' : 'wire';
+}
+
+function setAgentTab(tab, updateHash = true) {
+  if (!view.agent) return;
+  agentActiveTab = tab === 'report' ? 'report' : 'wire';
+  document.querySelectorAll('[data-agent-tab]').forEach((button) => {
+    const active = button.dataset.agentTab === agentActiveTab;
+    button.setAttribute('aria-selected', String(active));
+  });
+  const wire = document.getElementById('agent-panel-wire');
+  const report = document.getElementById('agent-panel-report');
+  if (wire) wire.hidden = agentActiveTab !== 'wire';
+  if (report) report.hidden = agentActiveTab !== 'report';
+  if (updateHash) {
+    const hash = `#${agentActiveTab}`;
+    if (window.location.hash !== hash) history.replaceState(null, '', hash);
+  }
+}
+
+function setupAgentTabs() {
+  document.querySelectorAll('[data-agent-tab]').forEach((button) => {
+    button.addEventListener('click', () => setAgentTab(button.dataset.agentTab || 'wire'));
+  });
+  window.addEventListener('hashchange', () => {
+    if (view.agent) setAgentTab(agentTabFromHash(), false);
+  });
+}
+
+function agentCardFromNow(now) {
+  return ((now && now.wall) || []).find(card => card.agent === view.agent) || null;
+}
+
+function latestAgentEvent(feed) {
+  return ((feed && feed.events) || [])[0] || null;
+}
+
+function agentFallbackAge(feed) {
+  const latest = latestAgentEvent(feed);
+  if (!latest) return null;
+  return Math.max(0, Math.floor(Date.now() / 1000) - Number(latest.occurredAt || 0));
+}
+
+function agentStateLine(card, feed) {
+  if (card) return nowStateCopy(card);
+  const age = agentFallbackAge(feed);
+  if (age === null) return 'quiet · no wire events';
+  return `quiet · ${ageLabel(age)} since last wire event`;
+}
+
+function agentStateCard(card, feed) {
+  if (card) return card;
+  return {
+    status: 'quiet',
+    quiet: true,
+    ageSeconds: agentFallbackAge(feed),
+    meta: latestAgentEvent(feed)?.title || 'no wire events',
+  };
+}
+
+function renderAgentHeader(data) {
+  const host = document.getElementById('agent-state-head');
+  const card = agentCardFromNow(data.now);
+  const state = agentStateCard(card, data.feed);
+  const tag = card && card.powderTag ? `<span class="ae-tag">${esc(card.powderTag)}</span>` : '';
+  const age = state.ageSeconds === null || state.ageSeconds === undefined ? '' : `<span class="ae-tag">${esc(ageLabel(state.ageSeconds))} ago</span>`;
+  host.innerHTML = `
+    <div>
+      <p class="ae-plate-cap">AGENT</p>
+      <h1 class="glass-agent-name">${esc(view.agent)}</h1>
+    </div>
+    <div class="glass-agent-state">
+      ${tag}
+      <span class="ae-status">${stateGlyph(state)}<span class="ae-status-label glass-agent-state-line">${esc(agentStateLine(card, data.feed))}</span></span>
+      ${age}
+    </div>`;
+}
+
+function renderAgentReportScope() {
+  const scope = document.getElementById('agent-report-scope');
+  if (scope) scope.textContent = `agent ${view.agent}`;
+}
+
+async function runAgentReport(force) {
+  const windowEl = document.getElementById('agent-report-window');
+  const statusEl = document.getElementById('agent-report-status');
+  const runEl = document.getElementById('agent-report-run');
+  const regenerateEl = document.getElementById('agent-report-regenerate');
+  const resultEl = document.getElementById('agent-report-result');
+  if (!windowEl || !statusEl || !runEl || !regenerateEl || !resultEl) return;
+  statusEl.textContent = force ? 'regenerating...' : 'running...';
+  runEl.disabled = true;
+  regenerateEl.hidden = true;
+  try {
+    const response = await fetch('/api/reports', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'activity-digest',
+        requestedBy: 'you',
+        regenerate: !!force,
+        scope: { type: 'agent', value: view.agent },
+        window: windowEl.value || 'past-24h',
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || 'report generation failed');
+    resultEl.innerHTML = body.html || '';
+    statusEl.textContent = body.cacheNote || '';
+    regenerateEl.hidden = !body.id;
+  } catch (err) {
+    statusEl.textContent = err.message || String(err);
+  } finally {
+    runEl.disabled = false;
+  }
+}
+
+function setupAgentReport() {
+  const runEl = document.getElementById('agent-report-run');
+  const regenerateEl = document.getElementById('agent-report-regenerate');
+  if (runEl) runEl.addEventListener('click', () => runAgentReport(false));
+  if (regenerateEl) regenerateEl.addEventListener('click', () => runAgentReport(true));
+}
+
+function renderAgentPage(data) {
+  const page = document.getElementById('agent-page');
+  if (page) page.hidden = false;
+  currentSessions = new Map(((data.feed && data.feed.sessions) || []).map(session => [session.id, session]));
+  renderDeskHeader();
+  renderAgentHeader(data);
+  renderAgentReportScope();
+  renderWire(document.getElementById('agent-wire-feed'), (data.feed && data.feed.events) || [], null);
+  setAgentTab(agentTabFromHash(), false);
+}
+
 function openFeedDetail(id) {
   const event = currentFeedEvents.get(id);
   if (!event) return;
@@ -3647,6 +3875,8 @@ document.querySelectorAll('[data-now-sort]').forEach((button) => {
   });
 });
 updateSortControls();
+setupAgentTabs();
+setupAgentReport();
 
 function surfaceHtml(post, surface, index) {
   const kind = surface.kind;
@@ -3717,7 +3947,7 @@ function renderPosts(host, posts) {
 function renderDeskHeader() {
   const host = document.getElementById('desk-header');
   if (view.agent) {
-    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Now</a></p><h2 class="ae-h">${esc(view.agent)}</h2>`;
+    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Now</a></p>`;
   } else if (view.session) {
     const session = currentSessions.get(view.session);
     host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Now</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
@@ -3746,25 +3976,32 @@ function renderNow(data) {
 
 function render(data) {
   const postsHost = document.getElementById('posts');
+  const agentPage = document.getElementById('agent-page');
   if (ambient()) {
     currentSessions = new Map();
     renderDeskHeader();
+    if (agentPage) agentPage.hidden = true;
     renderNow(data);
+  } else if (view.agent) {
+    setNowHidden(true);
+    postsHost.hidden = true;
+    renderAgentPage(data);
   } else {
     currentSessions = new Map((data.sessions || []).map(session => [session.id, session]));
     renderDeskHeader();
     setNowHidden(true);
+    if (agentPage) agentPage.hidden = true;
     postsHost.hidden = false;
     renderPosts(postsHost, data.posts || []);
   }
 }
 
 async function load() {
-  const response = await fetch(fetchUrl());
-  const raw = await response.text();
+  const data = await fetchData();
+  const raw = JSON.stringify(data);
   if (raw === lastPayload) return;
   lastPayload = raw;
-  render(JSON.parse(raw));
+  render(data);
 }
 load();
 setInterval(load, 1500);
