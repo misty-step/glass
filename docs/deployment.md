@@ -45,8 +45,8 @@ Until weave ships that surface, custom windows degrade to the nearest shelf
 window (if available) or a clear error event.
 
 Set `GLASS_LANDMARK_RELEASE_EVENTS_URL` to the box-native Landmark release
-events JSON endpoint to merge release rows into the default ambient feed
-(`GET /api/feed/recent`, glass-926). Left unset, the feed still renders native
+events JSON endpoint to merge release rows into the Wire under Now
+(`GET /api/feed/recent`, glass-926). Left unset, the Wire still renders native
 Glass posts and reports Landmark as unconfigured; it never reads the retired
 laptop `~/.factory-lanes/feed/*.jsonl` files.
 

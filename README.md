@@ -3,17 +3,28 @@
 Glass is the Misty Step live stage: a Rust service where agents publish typed
 surfaces during work and the operator watches them from the tailnet. Glass is
 ONE-WAY — there is no reply channel back to the producing agent; operator
-communication happens somewhere else.
+communication happens in Powder or another work surface.
 
 It is intentionally Sideshow-compatible at the protocol level while replacing
 the runtime with a native Rust service.
 
-## What Ships In This MVP
+[`VISION.md`](VISION.md) is the product law.
 
-- A default ambient feed at `/`, sourced from Glass's own post store plus a
-  configured Landmark release-event feed. Every agent also gets its own live
-  status feed at `/agent/:agent`, in addition to the `/session/:id`
-  drill-down.
+## Operator Shape
+
+- `/` is Now: a fleet wall joined from active Powder claims and Glass live
+  sessions, followed by the Wire of recent evidence. A claimed card with no
+  Glass posts renders as claimed-quiet instead of disappearing.
+- `/needs-you` is the operator ask queue. It reads Powder awaiting-input runs
+  and relays answers to Powder; it does not create a Glass reply channel to the
+  producing agent.
+- `/reports` is the persisted report library and generator. Activity digests,
+  fleet digests, backlog reports, review indexes, and the scheduled daily and
+  weekly standing digests all reopen at stable `/reports/:id` URLs.
+- `/clips` is the one-way clip queue for moments captured from posts/surfaces,
+  with context, evidence links, and deterministic draft captions.
+- Every agent also has a live status feed at `/agent/:agent`, in addition to
+  the `/session/:id` drill-down.
 - Typed surfaces: `html`, `diff`, `image`, `trace`, `markdown`, `terminal`,
   `mermaid`, `json`, `code`, and `metric` (a label+value chip).
 - Content-addressed assets at `/a/:sha256`.
@@ -26,14 +37,11 @@ the runtime with a native Rust service.
   keyed post-diff renderer so polling never re-mounts a live surface's
   iframe unless that post actually changed.
 - A read-only review report at `/review/sample`: narration before raw diff,
-  three cited context layers (change, Powder ticket, VISION ref), reviewer
-  sanity status, and raw diff available only behind a disclosure.
+  three cited context layers (change, Powder ticket, `VISION.md#live-stage`),
+  reviewer sanity status, and raw diff available only behind a disclosure.
 - `glass publish` CLI subcommand wrapping the same core the MCP tool calls,
   plus curl-first setup docs and a small stateless MCP-compatible HTTP
   endpoint for consumers without CLI access.
-- A one-way clip primitive: `POST /api/clips` and MCP `capture_clip` mark an
-  interesting post/surface moment into `/clips` with context, evidence links,
-  and a deterministic draft caption.
 
 ## Quickstart
 
@@ -116,9 +124,9 @@ curl -s "http://127.0.0.1:9041/api/clips" | jq .
 open http://127.0.0.1:9041/clips
 ```
 
-To have a post land in the ambient feed with Bridge-style row semantics,
-declare feed metadata on any surface. Untyped posts still appear as `report`
-rows.
+To have a post land in the Wire with Bridge-style row semantics, declare feed
+metadata on any surface. Untyped posts still appear as `report` rows in the
+Wire under Now.
 
 ```sh
 glass publish --db data/glass.db --title "Release shipped" \
@@ -127,9 +135,9 @@ glass publish --db data/glass.db --title "Release shipped" \
 [
   {
     "kind": "markdown",
-    "markdown": "The default feed is live.",
+    "markdown": "The Wire under Now is live.",
     "feedKind": "shipped",
-    "summary": "Ambient feed now reads the native Glass post store.",
+    "summary": "The Wire now reads the native Glass post store.",
     "evidenceLinks": [
       {"label": "PR", "url": "https://github.com/misty-step/glass/pull/926"}
     ]
@@ -137,6 +145,22 @@ glass publish --db data/glass.db --title "Release shipped" \
 ]
 JSON
 ```
+
+Generate a persisted report:
+
+```sh
+curl -s -X POST http://127.0.0.1:9041/api/reports \
+  -H 'content-type: application/json' \
+  --data '{
+    "kind": "activity-digest",
+    "scope": { "type": "fleet" },
+    "window": "last-week",
+    "requestedBy": "operator"
+  }' | jq .
+```
+
+The long-running `serve` process also writes standing daily and weekly
+activity digests into the same library at local 06:00.
 
 ## Verified-Live Walkthrough
 
@@ -217,8 +241,8 @@ The same command runs in GitHub Actions. It keeps the original Rust floor
   `target/coverage/`
 - `scripts/e2e.sh`, which installs the pinned Playwright dependency, launches a
   seeded local Glass server plus a mock Powder API, and browser-tests the
-  rendered viewer, theme control, sandbox iframe path, and backlog report
-  surface
+  Now wall, report generation/reopen, Needs you answer relay, mobile shell,
+  sandbox iframe path, and the fresh-operator report-library path
 
 Local prerequisite tools: `cargo-llvm-cov` and Node/npm. Playwright's Chromium
 browser is installed by the e2e script; on Linux/CI the script also asks

@@ -5,11 +5,17 @@ intentionally smaller than the implementation:
 
 - HTTP API for sessions, posts, assets, sandbox rendering, setup docs, and
   MCP-compatible JSON-RPC.
-- Viewer HTML served from `/`, `/agent/:agent`, and `/session/:id`. The
-  default `/` route polls `/api/feed/recent`, an ambient reverse-chron feed
-  projected from native Glass posts plus configured Landmark release events;
-  the drill-down routes keep polling `/api/posts/recent` while loading rich
+- Shared-shell HTML for the operator IA: `/` (Now), `/needs-you`, `/reports`,
+  `/reports/:id`, `/clips`, `/agent/:agent`, and `/session/:id`.
+- Now polls `/api/now`, which joins active Powder claims with Glass sessions
+  for the fleet wall and includes the Wire, a reverse-chron evidence feed from
+  native Glass posts plus configured Landmark release events.
+- The drill-down routes keep polling `/api/posts/recent` while loading rich
   surfaces through `/s/:post_id?part=N`.
+- Reports persist generated documents in SQLite. `POST /api/reports` writes
+  activity, fleet, backlog, and review-index reports; `GET /reports` lists the
+  library; `GET /reports/:id` reopens the stored document. The serve process
+  also schedules daily and weekly standing activity digests at local 06:00.
 - Domain methods on `Glass` that tests exercise directly for exact asset
   semantics.
 
@@ -42,16 +48,41 @@ single-session drill-down via `?sessionId=...`. Both routes serve the same
 `VIEWER_HTML`; the client reads its own route out of `window.location` since
 there is no server-side templating.
 
-## Ambient Feed
+## Now And The Wire
 
-`GET /api/feed/recent` is a projection over box-native sources only: the local
-SQLite post store and the configured `GLASS_LANDMARK_RELEASE_EVENTS_URL`.
-Producers can declare Bridge-compatible row semantics by putting `feedKind`,
-`summary`, `detail`, and `evidenceLinks` on any posted surface. If no
-`feedKind` is declared, the post appears as a `report` row. Evidence links are
-declared links plus native Glass detail links (`/session/...`, `/s/...`, and
-`/a/...`); the viewer opens a read-only detail dialog and exposes no reply or
-approval channel.
+`GET /api/now` is the root read model. It returns stats, wall cards, Wire rows,
+dead-session folds, and upstream notices. Wall cards come from active Powder
+claims joined to live Glass sessions; claimed-quiet is a first-class state when
+Powder says an agent is working and Glass has not received posts from it.
+
+The Wire rows are also available through `GET /api/feed/recent`. That endpoint
+is a projection over box-native sources only: the local SQLite post store and
+the configured `GLASS_LANDMARK_RELEASE_EVENTS_URL`. Producers can declare
+Bridge-compatible row semantics by putting `feedKind`, `summary`, `detail`, and
+`evidenceLinks` on any posted surface. If no `feedKind` is declared, the post
+appears as a `report` row. Evidence links are declared links plus native Glass
+detail links (`/session/...`, `/s/...`, and `/a/...`); the viewer opens a
+read-only detail dialog and exposes no reply or approval channel.
+
+## Needs You
+
+`/needs-you` and `GET /api/needs-you` read Powder awaiting-input runs. Answers
+posted to `POST /api/needs-you/answer` are relayed to Powder's answer endpoint.
+This is still one-way for Glass: the answer belongs to Powder's work ledger and
+does not create a reply channel to the producing agent inside Glass.
+
+## Reports
+
+The `reports` table stores report kind, scope, window, rendered HTML, metadata,
+generation time, and requester. Manual generation always creates a new report
+row. The standing digest scheduler is narrower: before inserting a daily or
+weekly activity digest, it skips when any fleet activity digest already exists
+for that exact window.
+
+Legacy human routes `/rep1` and `/backlog/:repo` redirect to `/reports` with
+the matching generator kind/scope selected. The API routes
+`/api/rep1/:window`, `/api/backlog/:repo`, and `/api/window-report/:window`
+remain available for consumers that already poll them.
 
 ## Dead Session Demotion
 

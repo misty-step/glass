@@ -406,7 +406,7 @@ async fn recent_feed_projects_glass_posts_as_bridge_shaped_events() {
     let session = glass
         .create_session(NewSession {
             agent: "codex-glass".into(),
-            title: "glass-926 ambient feed".into(),
+            title: "glass-926 Wire".into(),
             cwd: None,
         })
         .expect("session");
@@ -420,9 +420,9 @@ async fn recent_feed_projects_glass_posts_as_bridge_shaped_events() {
                 Surface::new(
                     SurfaceKind::Markdown,
                     json!({
-                        "markdown": "The default feed reads Glass posts.",
+                        "markdown": "The Wire reads Glass posts.",
                         "feedKind": "shipped",
-                        "summary": "Ambient feed is backed by the native post store.",
+                        "summary": "The Wire is backed by the native post store.",
                         "evidenceLinks": [{"label": "PR", "url": "https://github.com/misty-step/glass/pull/926"}]
                     }),
                 )
