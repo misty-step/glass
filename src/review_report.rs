@@ -88,6 +88,11 @@ pub async fn review_sample_shell() -> Response {
     }
 }
 
+pub(crate) fn generate_sample_review_html() -> Result<(String, String), String> {
+    let report = sample_review();
+    render_report_body(&report).map(|html| (report.title.to_string(), html))
+}
+
 fn render_review_shell(
     report: &ReviewReport,
     needs_you_count: Option<usize>,

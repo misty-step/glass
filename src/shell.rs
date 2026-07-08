@@ -1,4 +1,4 @@
-pub(crate) const REPORTS_PATH: &str = "/rep1";
+pub(crate) const REPORTS_PATH: &str = "/reports";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Place {

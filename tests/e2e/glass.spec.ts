@@ -37,7 +37,7 @@ async function expectSharedRail(page, activeName: string | null) {
   );
   await expect(rail.getByRole("link", { name: "Reports" })).toHaveAttribute(
     "href",
-    "/rep1",
+    "/reports",
   );
   await expect(rail.getByRole("link", { name: "Clips" })).toHaveAttribute(
     "href",
@@ -192,18 +192,26 @@ test("now teaches the empty fleet and empty wire states", async ({ page }) => {
   );
 });
 
-test("native backlog surface renders through the shared report path", async ({
+test("reports generator persists a last-week fleet activity digest", async ({
   page,
 }) => {
   await setSystemMode(page);
-  await page.goto("/backlog/glass");
-  await expectSharedRail(page, null);
+  await page.goto("/reports");
+  await expectSharedRail(page, "Reports");
 
-  await expect(page.locator("#backlog-repo")).toHaveValue("glass");
-  await expect(page.getByText("glass backlog")).toBeVisible();
-  await expect(page.getByText("glass-905")).toBeVisible();
-  await expect(page.getByText("Application floor")).toBeVisible();
-  await expect(page.locator('[data-glance-component="table"]')).toBeVisible();
+  await expect(page.getByText("GENERATE A REPORT")).toBeVisible();
+  await expect(page.locator("#reports-range")).toContainText("->");
+  await page.getByRole("button", { name: "Generate report" }).click();
+  await expect(page).toHaveURL(/\/reports\/R-001$/);
+  await expectSharedRail(page, "Reports");
+  await expect(page.getByText("Activity digest - fleet").first()).toBeVisible();
+  await expect(page.getByText("Native service MVP")).toBeVisible();
+  await expect(page.getByText("Powder completions")).toBeVisible();
+  await expect(
+    page
+      .locator('[data-glance-component="table"]')
+      .filter({ hasText: "Powder completions" }),
+  ).toBeVisible();
 });
 
 test("shared shell rail renders on every human HTML route", async ({ page }) => {
@@ -212,9 +220,8 @@ test("shared shell rail renders on every human HTML route", async ({ page }) => 
   const routes: Array<[string, string | null]> = [
     ["/", "Now"],
     ["/agent/e2e-agent", "Now"],
-    ["/rep1", "Reports"],
+    ["/reports", "Reports"],
     ["/clips", "Clips"],
-    ["/backlog/glass", null],
     ["/needs-you", "Needs you · 2"],
     ["/review/sample", null],
   ];
