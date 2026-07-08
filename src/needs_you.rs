@@ -92,6 +92,14 @@ fn triage_script_path() -> std::path::PathBuf {
 #[derive(Debug, Deserialize)]
 struct AwaitingResponse {
     awaiting: Vec<AwaitingItem>,
+    #[serde(default)]
+    answered: Vec<AnsweredItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NeedsYouData {
+    awaiting: Vec<AwaitingItem>,
+    answered: Vec<AnsweredItem>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -126,6 +134,18 @@ struct RunInfo {
     created_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct AnsweredItem {
+    card: CardBrief,
+    #[serde(default)]
+    question: Option<QuestionPayload>,
+    run: RunInfo,
+    #[serde(default)]
+    answer: Option<String>,
+    #[serde(default)]
+    answered_at: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 struct TriageAnnotation {
     #[serde(default)]
@@ -148,15 +168,15 @@ struct TriageAnnotation {
     run: Option<String>,
 }
 
-async fn fetch_awaiting() -> Result<Vec<AwaitingItem>, String> {
+async fn fetch_awaiting() -> Result<NeedsYouData, String> {
     fetch_awaiting_with_reporting(true).await
 }
 
-async fn fetch_awaiting_silent() -> Result<Vec<AwaitingItem>, String> {
+async fn fetch_awaiting_silent() -> Result<NeedsYouData, String> {
     fetch_awaiting_with_reporting(false).await
 }
 
-async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<Vec<AwaitingItem>, String> {
+async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<NeedsYouData, String> {
     let base = match powder_base_url() {
         Some(base) => base,
         None => {
@@ -211,10 +231,13 @@ async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<Vec<Awaiti
             response.status()
         ));
     }
-    let mut items = response
+    let mut data = response
         .json::<AwaitingResponse>()
         .await
-        .map(|body| body.awaiting)
+        .map(|body| NeedsYouData {
+            awaiting: body.awaiting,
+            answered: body.answered,
+        })
         .map_err(|err| {
             if report_errors {
                 crate::canary::report_error(
@@ -224,8 +247,14 @@ async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<Vec<Awaiti
             }
             format!("parse {url}: {err}")
         })?;
-    sort_awaiting(&mut items);
-    Ok(items)
+    sort_awaiting(&mut data.awaiting);
+    data.answered.sort_by(|a, b| {
+        b.answered_at
+            .unwrap_or(0)
+            .cmp(&a.answered_at.unwrap_or(0))
+            .then_with(|| a.card.id.cmp(&b.card.id))
+    });
+    Ok(data)
 }
 
 fn awaiting_input_url_from_api_base(base: &str) -> String {
@@ -343,15 +372,6 @@ fn kind_of(ann: Option<&TriageAnnotation>) -> &'static str {
     }
 }
 
-fn chip_for(kind: &str) -> &'static str {
-    match kind {
-        "question" => "?",
-        "act" => "ACT",
-        "endorse" => "CLOSE ME",
-        _ => "DECIDE",
-    }
-}
-
 fn html_escape(raw: &str) -> String {
     raw.chars()
         .flat_map(|ch| match ch {
@@ -381,10 +401,8 @@ fn relative_time(ts: i64, now: DateTime<Utc>) -> String {
     }
 }
 
-/// One rendered row (the compact rail entry) + its sheet detail markup,
-/// tagged with its curator kind for grouping.
+/// One rendered ask row plus its hidden dialog detail markup.
 struct Rendered {
-    kind: &'static str,
     row_and_sheet: String,
 }
 
@@ -417,26 +435,32 @@ fn render_item(
         .unwrap_or_else(|| now.timestamp());
     let age = relative_time(created_at, now);
     let untriaged_marker = if ann.is_none() {
-        r#"<span class="ny-untriaged" title="curator has not judged this ask yet">untriaged</span>"#
+        r#" <span class="ae-tag ae-tag-bare ny-untriaged" title="curator has not judged this ask yet">untriaged</span>"#
     } else {
         ""
     };
+    let blocker = ann
+        .and_then(|a| a.situation.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(item.card.title.as_str());
     let sheet_id = format!("ny-sheet-{}", html_escape(card_id));
 
     let row = format!(
-        r#"<button type="button" class="ny-row ny-row-{kind}" data-sheet="{sheet_id}">
-  <span class="ny-chip ny-chip-{kind}">{chip}</span>
-  <span class="ny-id">{card_id}</span>
-  <span class="ny-title">{ask_line}</span>
-  {untriaged_marker}<span class="ny-age">{age}</span>
-</button>"#,
+        r#"<div class="ny-row ny-row-{kind}">
+  <span class="ny-row-text">
+    <span class="ae-item">{ask_line}</span>{untriaged_marker}<br>
+    <span class="ae-dim ny-meta-line">{agent} &middot; powder {card_id} &middot; asked {age} &middot; {blocker}</span>
+  </span>
+  <button type="button" class="ae-button ae-button-quiet ny-open-btn" data-sheet="{sheet_id}">Answer</button>
+</div>"#,
         kind = kind,
-        chip = chip_for(kind),
         sheet_id = sheet_id,
+        agent = html_escape(&item.run.agent),
         card_id = html_escape(card_id),
         ask_line = html_escape(&ask_line),
         untriaged_marker = untriaged_marker,
         age = age,
+        blocker = html_escape(blocker),
     );
 
     let mut curator = String::new();
@@ -471,7 +495,7 @@ fn render_item(
 
     let evidence: Vec<String> = ann.map(|a| a.evidence_links.clone()).unwrap_or_default();
     let ev_html = if evidence.is_empty() {
-        r#"<span class="ny-dim">no evidence links in this ask</span>"#.to_string()
+        r#"<span class="ae-dim">no evidence links in this ask</span>"#.to_string()
     } else {
         evidence
             .iter()
@@ -520,63 +544,97 @@ fn render_item(
     );
 
     Rendered {
-        kind,
         row_and_sheet: row + &sheet,
     }
 }
 
+fn render_answered_item(item: &AnsweredItem, now: DateTime<Utc>) -> String {
+    let question_text = item
+        .question
+        .as_ref()
+        .map(|q| q.payload.clone())
+        .unwrap_or_else(|| item.card.title.clone());
+    let ask_line = question_text
+        .lines()
+        .next()
+        .unwrap_or(&item.card.title)
+        .to_string();
+    let answered_at = item
+        .answered_at
+        .or_else(|| item.question.as_ref().and_then(|q| q.created_at))
+        .or(item.run.created_at)
+        .unwrap_or_else(|| now.timestamp());
+    let age = relative_time(answered_at, now);
+    let answer = item.answer.as_deref().unwrap_or("").trim();
+    let answer_html = if answer.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<span class="ae-dim ny-meta-line">answered: {}</span>"#,
+            html_escape(answer)
+        )
+    };
+    format!(
+        r#"<div class="ny-answered-row">
+  <span class="ae-item">{ask_line}</span><br>
+  <span class="ae-dim ny-meta-line">{agent} &middot; powder {card_id} &middot; answered {age}</span>
+  {answer_html}
+</div>"#,
+        ask_line = html_escape(&ask_line),
+        agent = html_escape(&item.run.agent),
+        card_id = html_escape(&item.card.id),
+        age = age,
+        answer_html = answer_html,
+    )
+}
+
 fn render_needs_you(
     items: &[AwaitingItem],
+    answered: &[AnsweredItem],
     annotations: &HashMap<String, TriageAnnotation>,
 ) -> String {
     let board_url = powder_board_url().unwrap_or_else(|| "#".to_string());
-    render_needs_you_with_board_url(items, annotations, &board_url)
+    render_needs_you_with_board_url(items, answered, annotations, &board_url)
 }
 
 fn render_needs_you_with_board_url(
     items: &[AwaitingItem],
+    answered: &[AnsweredItem],
     annotations: &HashMap<String, TriageAnnotation>,
     board_url: &str,
 ) -> String {
-    if items.is_empty() {
-        return r#"<p class="ny-dim">Nothing in the fleet is awaiting your input right now.</p>"#
-            .to_string();
-    }
     let now = Utc::now();
-
-    let rendered: Vec<Rendered> = items
-        .iter()
-        .map(|item| render_item(item, annotations.get(&item.run.id), now, board_url))
-        .collect();
-
-    let mut out = String::new();
-    for (kind, label) in [
-        ("decide", "Decide"),
-        ("question", "Clarify"),
-        ("act", "Only you can"),
-    ] {
-        let group: Vec<&str> = rendered
+    let mut out = format!(
+        r#"<p class="ae-h">WAITING ON YOU &middot; {}</p>"#,
+        items.len()
+    );
+    if items.is_empty() {
+        out.push_str(
+            r#"<p class="ny-empty ae-dim">Nothing in the fleet is awaiting your input right now.</p>"#,
+        );
+    } else {
+        let rows = items
             .iter()
-            .filter(|r| r.kind == kind)
-            .map(|r| r.row_and_sheet.as_str())
-            .collect();
-        if !group.is_empty() {
-            out.push_str(&format!(r#"<p class="ny-group">{label}</p>"#));
-            out.push_str(&group.join(""));
-        }
+            .map(|item| {
+                render_item(item, annotations.get(&item.run.id), now, board_url).row_and_sheet
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        out.push_str(&format!(r#"<div class="ny-list">{rows}</div>"#));
     }
-    let litter: Vec<&str> = rendered
-        .iter()
-        .filter(|r| r.kind == "endorse")
-        .map(|r| r.row_and_sheet.as_str())
-        .collect();
-    if !litter.is_empty() {
+
+    if !answered.is_empty() {
+        let rows = answered
+            .iter()
+            .map(|item| render_answered_item(item, now))
+            .collect::<Vec<_>>()
+            .join("");
         out.push_str(&format!(
-            r#"<details class="ny-litter"><summary>{} endorsement ask(s) &mdash; answer &ldquo;ship it&rdquo;</summary>{}</details>"#,
-            litter.len(),
-            litter.join("")
+            r#"<details class="ae-fold ny-answered"><summary><span class="ae-dim">ANSWERED</span><span class="ae-dim">{} from API</span></summary>{rows}</details>"#,
+            answered.len()
         ));
     }
+
     out
 }
 
@@ -585,26 +643,25 @@ pub(crate) async fn awaiting_input_count() -> Option<usize> {
         .await
         .ok()
         .and_then(Result::ok)
-        .map(|items| items.len())
+        .map(|data| data.awaiting.len())
 }
 
 /// `GET /api/needs-you`. Streams a skeleton event, then a full event with
-/// pre-rendered rail HTML: kind-grouped rows sourced from Powder's
-/// `runs/awaiting-input` (no repo filter -- every repo's asks land here,
-/// closing bridge-006's gap) with curator annotations read from
-/// `.ask-triage.json`. A curator refresh is kicked off best-effort in the
-/// background (never blocks this response).
+/// pre-rendered ask rows sourced from Powder's `runs/awaiting-input` (no
+/// repo filter -- every repo's asks land here, closing bridge-006's gap)
+/// with curator annotations read from `.ask-triage.json`. A curator refresh
+/// is kicked off best-effort in the background (never blocks this response).
 pub async fn needs_you_report() -> impl IntoResponse {
     trigger_triage_refresh_once();
     let stream = async_stream::stream! {
         yield Ok::<_, Infallible>(Event::default().event("skeleton").data(json!({"stage": "skeleton"}).to_string()));
         match fetch_awaiting().await {
-            Ok(items) => {
+            Ok(data) => {
                 let annotations = load_triage_annotations();
-                let html = render_needs_you(&items, &annotations);
+                let html = render_needs_you(&data.awaiting, &data.answered, &annotations);
                 yield Ok::<_, Infallible>(
                     Event::default().event("full").data(
-                        json!({"stage": "full", "count": items.len(), "html": html}).to_string(),
+                        json!({"stage": "full", "count": data.awaiting.len(), "html": html}).to_string(),
                     ),
                 );
             }
@@ -708,39 +765,41 @@ pub async fn answer(
 }
 
 const NEEDS_YOU_STYLE: &str = r#"
-.ny-shell { max-width: 760px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-.ny-group { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ae-ink-muted); margin: var(--ae-space-6) 0 var(--ae-space-3); }
-.ny-row { display: flex; align-items: center; gap: var(--ae-space-3); width: 100%; text-align: left; padding: var(--ae-space-3) var(--ae-space-4); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); cursor: pointer; margin-bottom: var(--ae-space-2); }
-.ny-chip { font-family: var(--ae-font-mono); font-size: 11px; font-weight: var(--ae-w-medium); padding: 2px 6px; border: 1px solid var(--ae-line); }
-.ny-id { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); }
-.ny-title { flex: 1; }
-.ny-age { font-size: 12px; color: var(--ae-ink-muted); white-space: nowrap; }
-.ny-untriaged { font-size: 11px; color: var(--ae-ink-muted); }
-.ny-litter summary { cursor: pointer; color: var(--ae-ink-muted); font-size: 13px; margin-top: var(--ae-space-5); }
-.ny-dim { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
+.ny-list { display: grid; max-width: 760px; border-top: 1px solid var(--ae-line); }
+.ny-row { display: flex; align-items: center; justify-content: space-between; gap: var(--ae-space-5); padding: 0.8em 0; border-bottom: 1px solid var(--ae-line); }
+.ny-row-text { min-width: 0; }
+.ny-open-btn { flex: none; min-height: 32px; padding: 0.35em 1em; font-size: 13px; }
+.ny-meta-line { display: block; margin-top: 0.12em; font-size: 13px; line-height: 1.45; }
+.ny-untriaged { vertical-align: 0; }
+.ny-empty, .ny-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; }
+.ny-answered { max-width: 760px; margin-top: var(--ae-space-8); }
+.ny-answered-row { padding: 0.7em 0; border-top: 1px solid var(--ae-line); }
+.ny-answered-row:first-of-type { border-top: 0; }
 .ny-sheet-title { font-weight: var(--ae-w-medium); font-size: 16px; }
-.ny-meta { font-size: 12px; color: var(--ae-ink-muted); }
+.ny-meta { font-size: 13px; color: var(--ae-ink-muted); }
 .ny-situation { margin: var(--ae-space-4) 0; }
 .ny-options li { margin-left: var(--ae-space-5); }
 .ny-reco { border: 1px solid var(--ae-line); padding: var(--ae-space-3); margin: var(--ae-space-4) 0; }
 .ny-evidence-row { display: flex; gap: var(--ae-space-2); flex-wrap: wrap; margin: var(--ae-space-3) 0; }
-.ny-evidence { font-size: 12px; border: 1px solid var(--ae-line); padding: 2px 8px; }
+.ny-evidence { font-size: 13px; border: 1px solid var(--ae-line); padding: 2px 8px; }
 .ny-raw { margin: var(--ae-space-4) 0; }
 .ny-raw summary { cursor: pointer; color: var(--ae-ink-muted); font-size: 13px; }
 .ny-form { display: flex; flex-direction: column; gap: var(--ae-space-3); margin-top: var(--ae-space-4); }
-.ny-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-#ny-dialog { border: 1px solid var(--ae-line); padding: var(--ae-space-6); max-width: 640px; width: 90vw; }
-#ny-dialog::backdrop { background: rgba(0,0,0,0.4); }
+.ny-status { font-size: 13px; color: var(--ae-ink-muted); }
+#ny-dialog { width: min(40em, calc(100vw - 3em)); }
+@media (max-width: 36rem) {
+  .ny-row { display: grid; gap: var(--ae-space-3); }
+  .ny-open-btn { justify-self: start; }
+}
 "#;
 
 const NEEDS_YOU_BODY: &str = r#"
-    <div class="ny-shell">
-      <h1 class="ae-strong">Needs You</h1>
-      <div id="ny-body"><p class="ny-loading">Loading&hellip;</p></div>
-    </div>
-<dialog id="ny-dialog">
+<div id="ny-body"><p class="ny-loading">Loading&hellip;</p></div>
+<dialog id="ny-dialog" class="ae-dialog">
   <div id="ny-dialog-body"></div>
-  <button type="button" data-dialog-close class="ae-button ae-button-compact">Close</button>
+  <div class="ae-dialog-acts">
+    <button type="button" data-dialog-close class="ae-button ae-button-quiet">Close</button>
+  </div>
 </dialog>
 "#;
 
@@ -791,6 +850,11 @@ const NEEDS_YOU_SCRIPT: &str = r#"
   }
   function clearDraft(runId) {
     try { localStorage.removeItem('ny-draft-' + runId); } catch (err) {}
+  }
+  function updateRailCount(count) {
+    var link = document.querySelector('.ae-rail a[href="/needs-you"]');
+    if (!link || typeof count !== 'number') return;
+    link.textContent = 'Needs you · ' + count;
   }
 
   function wireAnswerButtons(scope) {
@@ -850,6 +914,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
     es.addEventListener('full', function(ev){
       var data = JSON.parse(ev.data);
       bodyEl.innerHTML = data.html;
+      updateRailCount(data.count);
       wireRows(bodyEl);
       es.close();
     });
@@ -920,15 +985,10 @@ mod tests {
     }
 
     #[test]
-    fn render_needs_you_groups_by_kind_and_collapses_endorse() {
+    fn render_needs_you_uses_fig5_waiting_rows() {
         let items = vec![
             awaiting_item("glass-1", "run-1", "team-lead", "DECIDE: pick a path"),
-            awaiting_item(
-                "glass-2",
-                "run-2",
-                "team-lead",
-                "please look at this, ship it?",
-            ),
+            awaiting_item("glass-2", "run-2", "reviewer", "ACT: approve the fixture"),
         ];
         let mut annotations = HashMap::new();
         annotations.insert(
@@ -942,35 +1002,65 @@ mod tests {
         annotations.insert(
             "run-2".to_string(),
             TriageAnnotation {
-                kind: Some("endorse".to_string()),
+                kind: Some("act".to_string()),
                 run: Some("run-2".to_string()),
-                recommended_answer: Some("ship it".to_string()),
                 ..Default::default()
             },
         );
-        let html = render_needs_you(&items, &annotations);
-        assert!(html.contains(r#"<p class="ny-group">Decide</p>"#));
-        assert!(html.contains("ny-litter"));
-        assert!(html.contains("1 endorsement ask(s)"));
-        assert!(html.contains("glass-1"));
-        assert!(html.contains("glass-2"));
+        let html = render_needs_you(&items, &[], &annotations);
+        assert!(html.contains(r#"<p class="ae-h">WAITING ON YOU &middot; 2</p>"#));
+        assert!(html.contains(r#"<span class="ae-item">DECIDE: pick a path</span>"#));
+        assert!(html.contains("team-lead &middot; powder glass-1 &middot; asked "));
+        assert!(
+            html.contains(r#"<button type="button" class="ae-button ae-button-quiet ny-open-btn""#)
+        );
+        assert!(!html.contains("ny-chip"));
+        assert!(!html.contains("ny-litter"));
     }
 
     #[test]
     fn render_needs_you_marks_untriaged_items_when_no_annotation_exists() {
         let items = vec![awaiting_item("glass-3", "run-3", "team-lead", "some ask")];
-        let html = render_needs_you(&items, &HashMap::new());
+        let html = render_needs_you(&items, &[], &HashMap::new());
         assert!(html.contains("untriaged"));
-        assert!(
-            html.contains(r#"<p class="ny-group">Decide</p>"#),
-            "untriaged defaults to decide"
-        );
+        assert!(html.contains(r#"<span class="ae-item">some ask</span>"#));
     }
 
     #[test]
     fn render_needs_you_reports_an_explicit_empty_state() {
-        let html = render_needs_you(&[], &HashMap::new());
+        let html = render_needs_you(&[], &[], &HashMap::new());
         assert!(html.contains("Nothing in the fleet is awaiting your input"));
+    }
+
+    #[test]
+    fn render_needs_you_only_shows_answered_fold_from_api_data() {
+        let no_answered = render_needs_you(&[], &[], &HashMap::new());
+        assert!(!no_answered.contains("ANSWERED"));
+
+        let answered = vec![AnsweredItem {
+            card: CardBrief {
+                id: "glass-1".to_string(),
+                title: "Shell work".to_string(),
+                repo: Some("glass".to_string()),
+                priority: Some("p1".to_string()),
+            },
+            question: Some(QuestionPayload {
+                payload: "DECIDE: keep it active?".to_string(),
+                created_at: Some(Utc::now().timestamp() - 120),
+            }),
+            run: RunInfo {
+                id: "run-1".to_string(),
+                agent: "glass-931-codex".to_string(),
+                created_at: Some(Utc::now().timestamp() - 300),
+            },
+            answer: Some("yes".to_string()),
+            answered_at: Some(Utc::now().timestamp() - 60),
+        }];
+        let html = render_needs_you(&[], &answered, &HashMap::new());
+        assert!(html.contains(r#"<details class="ae-fold ny-answered">"#));
+        assert!(html.contains("ANSWERED"));
+        assert!(html.contains("1 from API"));
+        assert!(html.contains("answered: yes"));
     }
 
     #[test]
@@ -986,7 +1076,7 @@ mod tests {
             Some("http://127.0.0.1:4175"),
         )
         .expect("board URL");
-        let html = render_needs_you_with_board_url(&items, &HashMap::new(), &board_url);
+        let html = render_needs_you_with_board_url(&items, &[], &HashMap::new(), &board_url);
 
         assert!(html.contains(r#"href="https://powder.sanctum.tailnet/board#card-glass-922""#));
         assert!(!html.contains("http://127.0.0.1:4175"));
