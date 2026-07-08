@@ -364,26 +364,30 @@ test("now renders the locked NOW-9 column and WIRE-10 tape", async ({
   await page.locator("[data-feed-close]").click();
 });
 
-test("reports generator persists a last-week fleet activity digest", async ({
+test("reports sentence builder renders and caches in place", async ({
   page,
 }) => {
   await setSystemMode(page);
   await page.goto("/reports");
   await expectSharedRail(page, "Reports");
 
-  await expect(page.getByText("GENERATE A REPORT")).toBeVisible();
-  await expect(page.locator("#reports-range")).toContainText("->");
-  await page.getByRole("button", { name: "Generate report" }).click();
-  await expect(page).toHaveURL(/\/reports\/R-\d+$/);
+  await expect(page.getByText("REPORT QUERY")).toBeVisible();
+  await expect(page.getByText("Show me")).toBeVisible();
+  await expect(page.locator("#reports-scope")).toHaveValue("fleet");
+  await expect(page.locator("#reports-window")).toHaveValue("past-24h");
+  await page.getByRole("button", { name: "Run" }).click();
+  await expect(page).toHaveURL(/\/reports$/);
   await expectSharedRail(page, "Reports");
-  await expect(page.getByText("Activity digest - fleet").first()).toBeVisible();
-  await expect(page.getByText("Native service MVP")).toBeVisible();
-  await expect(page.getByText("Powder completions")).toBeVisible();
-  await expect(
-    page
-      .locator('[data-glance-component="table"]')
-      .filter({ hasText: "Powder completions" }),
-  ).toBeVisible();
+  const report = page.locator("#reports-result .reports-doc");
+  await expect(report).toContainText("Activity digest - fleet");
+  await expect(report).toContainText("Rendered e2e seed");
+  await expect(report.locator(".glass-rep-stat-band")).toBeVisible();
+  await expect(report.locator(".glass-rep-bars")).toBeVisible();
+  await expect(page.locator("#reports-status")).toContainText("generated");
+
+  await page.getByRole("button", { name: "Run" }).click();
+  await expect(page.locator("#reports-status")).toContainText("cached · generated");
+  await expect(page.getByRole("button", { name: "regenerate" })).toBeVisible();
 });
 
 test("operator can walk every rail place from Now", async ({ page }) => {
@@ -422,7 +426,7 @@ test("clips human route redirects to Now while the API stays available", async (
   await expectSharedRail(page, "Now");
 });
 
-test("fresh operator reaches a last-week digest from Now in two clicks", async ({
+test("report handles still open without a reports library link", async ({
   page,
   request,
 }) => {
@@ -430,7 +434,7 @@ test("fresh operator reaches a last-week digest from Now in two clicks", async (
     data: {
       kind: "activity-digest",
       scope: { type: "fleet" },
-      window: "last-week",
+      window: "past-24h",
       requestedBy: "e2e-setup",
     },
   });
@@ -438,21 +442,15 @@ test("fresh operator reaches a last-week digest from Now in two clicks", async (
   const seeded = await seed.json();
 
   await setSystemMode(page);
-  await page.goto("/");
-  await expectSharedRail(page, "Now");
+  await page.goto("/reports");
+  await expectSharedRail(page, "Reports");
+  await expect(page.locator(`a[href="${seeded.url}"]`)).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Reports" }).click();
-  await expect(page).toHaveURL(/\/reports$/);
-  const digest = page.locator(".reports-library a", {
-    hasText: "Activity digest - fleet",
-  }).first();
-  await expect(digest).toHaveAttribute("href", seeded.url);
-
-  await digest.click();
+  await page.goto(seeded.url);
   await expect(page).toHaveURL(new RegExp(`${seeded.url}$`));
   await expectSharedRail(page, "Reports");
   await expect(page.getByText("Activity digest - fleet").first()).toBeVisible();
-  await expect(page.getByText("Powder completions")).toBeVisible();
+  await expect(page.getByText("Rendered e2e seed")).toBeVisible();
 });
 
 test("shared shell rail renders on every human HTML route", async ({ page }) => {
