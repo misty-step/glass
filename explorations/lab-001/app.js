@@ -16,10 +16,10 @@
     NOW: "round 2 · WINNER: NOW-9 (terser state copy in converge)",
     WIRE: "round 2 · WINNER: WIRE-10",
     REP: "round 2 · WINNER: REP-8",
-    DOC: "round 3 · reseeded — composed generative-UI, not a text document",
+    DOC: "LOCKED · DOC-13 instrument brief (operator delegated, 2026-07-08)",
     NEED: "LOCKED · NEED-1",
     CLIP: "closed",
-    AGENT: "round 2 · awaiting verdict",
+    AGENT: "LOCKED · AGENT-8 header + Wire|Report tabs (operator delegated)",
   };
   // round-1 kills (IDs never reused; builders remain reachable by direct hash)
   const KILLED = new Set([
