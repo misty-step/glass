@@ -2,7 +2,7 @@
 
 Glass is the operator live stage: watch the factory think.
 
-## The live stage
+## Live stage
 
 Glass answers three operator questions, and those questions govern the
 information architecture:
