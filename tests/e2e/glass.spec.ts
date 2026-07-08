@@ -25,7 +25,7 @@ async function expectSharedRail(page, activeName: string | null) {
   await expect(rail).toHaveCount(1);
   await expect(desk).toHaveCount(1);
 
-  await expect(rail.locator(".ae-logo")).toContainText("Glass");
+  await expect(rail.locator(".ae-logo")).toContainText("GLASS");
   await expect(rail.locator(".ae-h")).toHaveText("PLACES");
   await expect(rail.getByRole("link", { name: "Now" })).toHaveAttribute(
     "href",
