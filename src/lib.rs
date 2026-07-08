@@ -3296,6 +3296,7 @@ const VIEWER_STYLE: &str = r#"
 .glass-desk-header { margin-bottom: var(--ae-space-6); }
 .glass-desk-header:empty { display: none; }
 .glass-now-stats { margin-bottom: 2em; }
+.glass-now-stats .ae-icon { align-self: center; }
 .glass-now-notices { display: grid; gap: var(--ae-space-2); margin-bottom: var(--ae-space-5); }
 .glass-now-notice { border: 1px solid var(--ae-line); color: var(--ae-ink-muted); padding: var(--ae-space-3) var(--ae-space-4); font-size: 13px; }
 .glass-now-section { margin-bottom: var(--ae-space-7); }

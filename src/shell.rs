@@ -89,7 +89,7 @@ fn render_rail(active: Option<Place>, needs_you_count: Option<usize>, sanctum_ur
         r#"<aside class="ae-rail" aria-label="Glass places">
     <a class="ae-logo ae-logo-compact" href="/" aria-label="Glass">
       <span class="ae-app-mark">{APP_MARK_SVG}</span>
-      <span class="ae-name">Glass</span>
+      <span class="ae-name">GLASS</span>
     </a>
     <p class="ae-h">PLACES</p>
     {now}
