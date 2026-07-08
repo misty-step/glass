@@ -16,37 +16,32 @@ use tower::ServiceExt;
 
 fn assert_shared_rail(html: &str, active_href: Option<&str>) {
     assert_eq!(
-        html.matches(r#"<aside class="ae-rail" aria-label="Glass places">"#)
-            .count(),
+        html.matches(
+            r#"<aside id="glass-rail" class="ae-rail glass-rail" aria-label="Glass places">"#
+        )
+        .count(),
         1,
         "every human page must render exactly one shared rail: {html}"
     );
     assert!(html.contains(r#"<p class="ae-h">PLACES</p>"#));
+    assert!(html.contains(r#"href="/""#) && html.contains(">Now</span>"));
     assert!(
-        html.contains(r#"<a href="/">Now</a>"#)
-            || html.contains(r#"<a href="/" aria-current="page">Now</a>"#)
+        html.contains(r#"href="/needs-you""#) && html.contains(">Needs you</span>"),
+        "when Powder is unavailable, the needs-you place must degrade without breaking the link: {html}"
     );
+    assert!(html.contains(r#"href="/reports""#) && html.contains(">Reports</span>"));
     assert!(
-        html.contains(r#"<a href="/needs-you">Needs you</a>"#)
-            || html.contains(r#"<a href="/needs-you" aria-current="page">Needs you</a>"#),
-        "when Powder is unavailable, the needs-you place must degrade to no count: {html}"
-    );
-    assert!(
-        html.contains(r#"<a href="/reports">Reports</a>"#)
-            || html.contains(r#"<a href="/reports" aria-current="page">Reports</a>"#)
-    );
-    assert!(
-        html.contains(r#"<a href="/clips">Clips</a>"#)
-            || html.contains(r#"<a href="/clips" aria-current="page">Clips</a>"#)
+        !html.contains(r#"href="/clips""#),
+        "Clips is retired as a rail place: {html}"
     );
     assert!(html.contains("data-sanctum-home"));
-    assert!(html.contains(r#"<a href="/setup">Wire an agent</a>"#));
+    assert!(html.contains(r#"href="/setup""#) && html.contains(">Wire an agent</span>"));
     assert!(html.contains(r#"<button class="ae-mode" type="button""#));
 
     let current_count = html.matches(r#"aria-current="page""#).count();
     if let Some(href) = active_href {
         assert!(
-            html.contains(&format!(r#"<a href="{href}" aria-current="page">"#)),
+            html.contains(&format!(r#"href="{href}" aria-current="page""#)),
             "active place {href} is missing aria-current: {html}"
         );
         assert_eq!(current_count, 1, "only one place may be active: {html}");
@@ -320,13 +315,17 @@ async fn clip_capture_records_a_review_queue_item_with_context_and_caption() {
                 .unwrap(),
         )
         .await
-        .expect("clips page response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("Clip review queue"));
-    assert!(html.contains("clip this for review"));
-    assert_shared_rail(&html, Some("/clips"));
+        .expect("clips redirect response");
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .expect("location")
+            .to_str()
+            .expect("location text"),
+        "/"
+    );
 }
 
 #[tokio::test]
@@ -479,7 +478,7 @@ async fn default_view_loads_the_now_endpoint_and_keeps_drilldowns_reachable() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("ON STAGE"));
+    assert!(html.contains("THE FLEET"));
     assert!(html.contains("THE WIRE"));
     assert!(html.contains("/api/now"));
     assert!(html.contains("/agent/"));

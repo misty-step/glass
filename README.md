@@ -12,17 +12,19 @@ the runtime with a native Rust service.
 
 ## Operator Shape
 
-- `/` is Now: a fleet wall joined from active Powder claims and Glass live
-  sessions, followed by the Wire of recent evidence. A claimed card with no
-  Glass posts renders as claimed-quiet instead of disappearing.
+- `/` is Now: one attention-ordered fleet column joined from active Powder
+  claims and Glass live sessions, followed by the Wire of recent evidence. A
+  claimed card with no Glass posts renders as claimed-quiet instead of
+  disappearing.
 - `/needs-you` is the operator ask queue. It reads Powder awaiting-input runs
   and relays answers to Powder; it does not create a Glass reply channel to the
   producing agent.
 - `/reports` is the persisted report library and generator. Activity digests,
   fleet digests, backlog reports, review indexes, and the scheduled daily and
   weekly standing digests all reopen at stable `/reports/:id` URLs.
-- `/clips` is the one-way clip queue for moments captured from posts/surfaces,
-  with context, evidence links, and deterministic draft captions.
+- Clips are one-way captures for moments from posts/surfaces. They remain
+  available through `/api/clips` and report activity, but Clips is no longer a
+  top-level operator place.
 - Every agent also has a live status feed at `/agent/:agent`, in addition to
   the `/session/:id` drill-down.
 - Typed surfaces: `html`, `diff`, `image`, `trace`, `markdown`, `terminal`,
@@ -31,7 +33,7 @@ the runtime with a native Rust service.
 - Sandboxed render URLs at `/s/:post_id?part=N` with CSP sandbox response
   headers, not iframe attributes alone.
 - Dead sessions (quiet for longer than `LIVE_WINDOW_SECONDS`) are demoted out
-  of the primary fleet-wall rail; the API still serves their full post
+  of the primary Now column; the API still serves their full post
   history under their own agent/session feed.
 - A viewer built on the Misty Step Aesthetic kit (`/aesthetic.css`), with a
   keyed post-diff renderer so polling never re-mounts a live surface's
@@ -117,11 +119,10 @@ curl -s -X POST http://127.0.0.1:9041/api/clips \
   }' | jq .
 ```
 
-Review captured moments:
+Review captured moments through the API:
 
 ```sh
 curl -s "http://127.0.0.1:9041/api/clips" | jq .
-open http://127.0.0.1:9041/clips
 ```
 
 To have a post land in the Wire with Bridge-style row semantics, declare feed

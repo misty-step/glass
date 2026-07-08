@@ -6,10 +6,11 @@ intentionally smaller than the implementation:
 - HTTP API for sessions, posts, assets, sandbox rendering, setup docs, and
   MCP-compatible JSON-RPC.
 - Shared-shell HTML for the operator IA: `/` (Now), `/needs-you`, `/reports`,
-  `/reports/:id`, `/clips`, `/agent/:agent`, and `/session/:id`.
+  `/reports/:id`, `/agent/:agent`, and `/session/:id`. `/clips` is retired as
+  a human place and redirects to Now; clip capture remains in `/api/clips`.
 - Now polls `/api/now`, which joins active Powder claims with Glass sessions
-  for the fleet wall and includes the Wire, a reverse-chron evidence feed from
-  native Glass posts plus configured Landmark release events.
+  for the attention-ordered fleet column and includes the Wire, a reverse-chron
+  evidence feed from native Glass posts plus configured Landmark release events.
 - The drill-down routes keep polling `/api/posts/recent` while loading rich
   surfaces through `/s/:post_id?part=N`.
 - Reports persist generated documents in SQLite. `POST /api/reports` writes
@@ -50,8 +51,8 @@ there is no server-side templating.
 
 ## Now And The Wire
 
-`GET /api/now` is the root read model. It returns stats, wall cards, Wire rows,
-dead-session folds, and upstream notices. Wall cards come from active Powder
+`GET /api/now` is the root read model. It returns stats, fleet rows, Wire rows,
+dead-session data, and upstream notices. Fleet rows come from active Powder
 claims joined to live Glass sessions; claimed-quiet is a first-class state when
 Powder says an agent is working and Glass has not received posts from it.
 
@@ -88,10 +89,10 @@ remain available for consumers that already poll them.
 
 `LIVE_WINDOW_SECONDS` (600s) marks a session dead once it goes that long
 without a new post. `GET /api/posts/recent` reports `isLive` per session;
-the fleet wall on `/` renders only live sessions as peers, collapsing dead
-ones into an archive so they never crowd out active work. Dead sessions keep
+the Now column on `/` renders only active claimed/live peers, keeping dead
+sessions out of the primary operator scan. Dead sessions keep
 their full post history on their own agent/session feed — nothing is
-dropped, only demoted from the primary rail.
+dropped, only demoted from the primary column.
 
 ## Sandbox Boundary
 
