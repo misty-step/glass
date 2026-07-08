@@ -1176,6 +1176,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/surface-kinds", get(surface_kinds))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/posts", post(publish_post))
+        .route("/api/now", get(now))
         .route("/api/feed/recent", get(recent_feed))
         .route("/api/posts/recent", get(recent_posts))
         .route("/api/posts/{id}", get(get_post).put(update_post))
@@ -1384,6 +1385,173 @@ struct LandmarkStatus {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowResponse {
+    stats: NowStats,
+    wall: Vec<NowWallCard>,
+    wire: Vec<FeedEvent>,
+    dead: NowDeadSessions,
+    notices: Vec<NowNotice>,
+    landmark: LandmarkStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowStats {
+    agents_live: usize,
+    need_you_count: Option<usize>,
+    posts_today: usize,
+    sessions_today: usize,
+    seconds_since_last_event: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowNotice {
+    kind: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowDeadSessions {
+    agent_count: usize,
+    session_count: usize,
+    sessions: Vec<NowDeadSession>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowDeadSession {
+    agent: String,
+    title: String,
+    href: String,
+    last_active_at: i64,
+    age_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowWallCard {
+    agent: String,
+    href: String,
+    status: &'static str,
+    powder_tag: Option<String>,
+    powder_card_id: Option<String>,
+    powder_title: Option<String>,
+    meta: String,
+    session_id: Option<String>,
+    session_title: Option<String>,
+    post_id: Option<String>,
+    latest_kind: Option<FeedKind>,
+    latest_at: Option<i64>,
+    age_seconds: Option<i64>,
+    claimed_at: Option<i64>,
+    quiet: bool,
+    trace: Vec<NowTraceItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowTraceItem {
+    kind: FeedKind,
+    at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PowderClaim {
+    id: String,
+    title: String,
+    agent: String,
+    acquired_at: Option<i64>,
+    updated_at: i64,
+}
+
+async fn now(State(glass): State<Glass>) -> Result<Json<NowResponse>, ApiError> {
+    let raw_posts = glass
+        .list_recent_posts(100)
+        .map_err(|error| api_failure("glass.now.failed", "/api/now", error))?;
+    let raw_sessions = glass
+        .list_sessions()
+        .map_err(|error| api_failure("glass.now.failed", "/api/now", error))?;
+    let raw_session_by_id = raw_sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let posts = raw_posts
+        .into_iter()
+        .filter(|post| {
+            raw_session_by_id
+                .get(post.session_id.as_str())
+                .is_none_or(|session| !is_diagnostic_agent(&session.agent))
+        })
+        .collect::<Vec<_>>();
+    let sessions = raw_sessions
+        .into_iter()
+        .filter(|session| !is_diagnostic_agent(&session.agent))
+        .collect::<Vec<_>>();
+    let session_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+
+    let mut wire = posts
+        .iter()
+        .map(|post| post_feed_event(post, session_by_id.get(post.session_id.as_str()).copied()))
+        .collect::<Vec<_>>();
+    let landmark = fetch_landmark_feed(40).await;
+    wire.extend(landmark.events.clone());
+    wire.sort_by(|left, right| {
+        right
+            .occurred_at
+            .cmp(&left.occurred_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    wire.truncate(40);
+
+    let mut notices = Vec::new();
+    let claims = match fetch_powder_active_claims().await {
+        Ok(claims) => claims,
+        Err(message) => {
+            notices.push(NowNotice {
+                kind: "powder",
+                message: format!("Powder active claims unavailable: {message}"),
+            });
+            Vec::new()
+        }
+    };
+
+    let now = now_seconds();
+    let wall = build_now_wall(&claims, &posts, &sessions, now);
+    let dead = build_now_dead_sessions(&posts, &sessions, now);
+    let day_start = utc_day_start(now);
+    let stats = NowStats {
+        agents_live: wall.len(),
+        need_you_count: needs_you::awaiting_input_count().await,
+        posts_today: posts
+            .iter()
+            .filter(|post| post.created_at >= day_start || post.updated_at >= day_start)
+            .count(),
+        sessions_today: sessions
+            .iter()
+            .filter(|session| session.created_at >= day_start)
+            .count(),
+        seconds_since_last_event: wire
+            .first()
+            .map(|event| now.saturating_sub(event.occurred_at)),
+    };
+
+    Ok(Json(NowResponse {
+        stats,
+        wall,
+        wire,
+        dead,
+        notices,
+        landmark: landmark.status,
+    }))
+}
+
 async fn recent_posts(
     State(glass): State<Glass>,
     Query(query): Query<RecentQuery>,
@@ -1570,6 +1738,336 @@ fn summarize_agents(posts: &[Post], sessions: &[Session]) -> Vec<AgentSummary> {
             .then_with(|| left.agent.cmp(&right.agent))
     });
     agents
+}
+
+fn build_now_wall(
+    claims: &[PowderClaim],
+    posts: &[Post],
+    sessions: &[Session],
+    now: i64,
+) -> Vec<NowWallCard> {
+    let session_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<HashMap<_, _>>();
+    let mut latest_by_agent: BTreeMap<String, (&Session, &Post)> = BTreeMap::new();
+    for post in posts {
+        let Some(session) = session_by_id.get(post.session_id.as_str()) else {
+            continue;
+        };
+        if !session_is_live(session, now) {
+            continue;
+        }
+        let event_at = post.updated_at.max(post.created_at);
+        let replace = latest_by_agent
+            .get(&session.agent)
+            .is_none_or(|(_, current)| event_at > current.updated_at.max(current.created_at));
+        if replace {
+            latest_by_agent.insert(session.agent.clone(), (session, post));
+        }
+    }
+
+    let mut claims_by_agent: BTreeMap<String, &PowderClaim> = BTreeMap::new();
+    for claim in claims {
+        let replace = claims_by_agent.get(&claim.agent).is_none_or(|current| {
+            claim_sort_at(claim) > claim_sort_at(current)
+                || (claim_sort_at(claim) == claim_sort_at(current) && claim.id < current.id)
+        });
+        if replace {
+            claims_by_agent.insert(claim.agent.clone(), claim);
+        }
+    }
+
+    let mut agents = BTreeSet::new();
+    agents.extend(latest_by_agent.keys().cloned());
+    agents.extend(claims_by_agent.keys().cloned());
+    let mut cards = agents
+        .into_iter()
+        .map(|agent| {
+            let latest = latest_by_agent.get(&agent).copied();
+            let claim = claims_by_agent.get(&agent).copied();
+            now_wall_card(agent, latest, claim, posts, &session_by_id, now)
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|left, right| {
+        wall_sort_at(right)
+            .cmp(&wall_sort_at(left))
+            .then_with(|| left.agent.cmp(&right.agent))
+    });
+    cards
+}
+
+fn now_wall_card(
+    agent: String,
+    latest: Option<(&Session, &Post)>,
+    claim: Option<&PowderClaim>,
+    posts: &[Post],
+    session_by_id: &HashMap<&str, &Session>,
+    now: i64,
+) -> NowWallCard {
+    let href = format!("/agent/{}", url_path_segment(&agent));
+    if let Some((session, post)) = latest {
+        let latest_kind = feed_kind_for_post(post);
+        let latest_at = post.updated_at.max(post.created_at);
+        return NowWallCard {
+            agent: agent.clone(),
+            href,
+            status: if latest_kind == FeedKind::Blocked {
+                "warn"
+            } else {
+                "ok"
+            },
+            powder_tag: claim.map(|claim| format!("powder {}", claim.id)),
+            powder_card_id: claim.map(|claim| claim.id.clone()),
+            powder_title: claim.map(|claim| claim.title.clone()),
+            meta: latest_declared_act(post),
+            session_id: Some(session.id.clone()),
+            session_title: Some(session.title.clone()),
+            post_id: Some(post.id.clone()),
+            latest_kind: Some(latest_kind),
+            latest_at: Some(latest_at),
+            age_seconds: Some(now.saturating_sub(latest_at)),
+            claimed_at: claim.and_then(|claim| claim.acquired_at),
+            quiet: false,
+            trace: trace_for_agent(&agent, posts, session_by_id),
+        };
+    }
+
+    let claim = claim.expect("wall agent without live posts must have a claim");
+    let claimed_at = claim.acquired_at.unwrap_or(claim.updated_at);
+    NowWallCard {
+        agent,
+        href,
+        status: "quiet",
+        powder_tag: Some(format!("powder {}", claim.id)),
+        powder_card_id: Some(claim.id.clone()),
+        powder_title: Some(claim.title.clone()),
+        meta: format!(
+            "claimed {} ago · no posts yet",
+            compact_age(now.saturating_sub(claimed_at))
+        ),
+        session_id: None,
+        session_title: None,
+        post_id: None,
+        latest_kind: None,
+        latest_at: None,
+        age_seconds: Some(now.saturating_sub(claimed_at)),
+        claimed_at: Some(claimed_at),
+        quiet: true,
+        trace: Vec::new(),
+    }
+}
+
+fn latest_declared_act(post: &Post) -> String {
+    let kind = feed_kind_for_post(post);
+    let act = declared_summary(post)
+        .filter(|summary| !summary.trim().is_empty())
+        .unwrap_or_else(|| post.title.clone());
+    format!("{kind}: {act}")
+}
+
+fn trace_for_agent(
+    agent: &str,
+    posts: &[Post],
+    session_by_id: &HashMap<&str, &Session>,
+) -> Vec<NowTraceItem> {
+    posts
+        .iter()
+        .filter(|post| {
+            session_by_id
+                .get(post.session_id.as_str())
+                .is_some_and(|session| session.agent == agent)
+        })
+        .take(4)
+        .map(|post| NowTraceItem {
+            kind: feed_kind_for_post(post),
+            at: post.updated_at.max(post.created_at),
+        })
+        .collect()
+}
+
+fn build_now_dead_sessions(posts: &[Post], sessions: &[Session], now: i64) -> NowDeadSessions {
+    let latest_post_by_session =
+        posts
+            .iter()
+            .fold(HashMap::<&str, &Post>::new(), |mut acc, post| {
+                acc.entry(post.session_id.as_str()).or_insert(post);
+                acc
+            });
+    let day_ago = now.saturating_sub(86_400);
+    let mut sessions = sessions
+        .iter()
+        .filter(|session| {
+            !session_is_live(session, now)
+                && session.last_active_at >= day_ago
+                && latest_post_by_session.contains_key(session.id.as_str())
+        })
+        .map(|session| NowDeadSession {
+            agent: session.agent.clone(),
+            title: session.title.clone(),
+            href: format!("/agent/{}", url_path_segment(&session.agent)),
+            last_active_at: session.last_active_at,
+            age_seconds: now.saturating_sub(session.last_active_at),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        right
+            .last_active_at
+            .cmp(&left.last_active_at)
+            .then_with(|| left.agent.cmp(&right.agent))
+    });
+    let agent_count = sessions
+        .iter()
+        .map(|session| session.agent.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let session_count = sessions.len();
+    sessions.truncate(12);
+    NowDeadSessions {
+        agent_count,
+        session_count,
+        sessions,
+    }
+}
+
+fn session_is_live(session: &Session, now: i64) -> bool {
+    now.saturating_sub(session.last_active_at) < LIVE_WINDOW_SECONDS
+}
+
+fn wall_sort_at(card: &NowWallCard) -> i64 {
+    card.latest_at.or(card.claimed_at).unwrap_or_default()
+}
+
+fn claim_sort_at(claim: &PowderClaim) -> i64 {
+    claim.acquired_at.unwrap_or(claim.updated_at)
+}
+
+fn utc_day_start(now: i64) -> i64 {
+    now - now.rem_euclid(86_400)
+}
+
+fn compact_age(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
+}
+
+fn url_path_segment(raw: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::new();
+    for byte in raw.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(*byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
+}
+
+async fn fetch_powder_active_claims() -> Result<Vec<PowderClaim>, String> {
+    let base = std::env::var("GLASS_POWDER_API_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "GLASS_POWDER_API_BASE_URL is not configured".to_string())?;
+    let key = std::env::var("GLASS_POWDER_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "GLASS_POWDER_API_KEY is not configured".to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(900))
+        .build()
+        .map_err(|err| format!("build Powder client: {err}"))?;
+    let mut claims_by_id = BTreeMap::<String, PowderClaim>::new();
+    for status in ["claimed", "running", "awaiting_input"] {
+        let url = format!(
+            "{}/api/v1/cards?status={status}&limit=100",
+            base.trim_end_matches('/')
+        );
+        let response = client
+            .get(&url)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .map_err(|err| {
+                canary::report_error(
+                    "glass.now.powder.failed",
+                    "route=/api/now upstream=powder error_kind=transport",
+                );
+                format!("fetch active {status} cards: {err}")
+            })?;
+        if !response.status().is_success() {
+            canary::report_error(
+                "glass.now.powder.failed",
+                &format!(
+                    "route=/api/now upstream=powder upstream_status={} error_kind=upstream_status",
+                    response.status().as_u16()
+                ),
+            );
+            return Err(format!(
+                "fetch active {status} cards: upstream returned {}",
+                response.status()
+            ));
+        }
+        let value = response.json::<Value>().await.map_err(|err| {
+            canary::report_error(
+                "glass.now.powder.failed",
+                "route=/api/now upstream=powder error_kind=parse",
+            );
+            format!("parse active {status} cards: {err}")
+        })?;
+        let cards = value
+            .get("cards")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("parse active {status} cards: missing cards array"))?;
+        for card in cards {
+            if let Some(claim) = powder_claim_from_card(card) {
+                claims_by_id.entry(claim.id.clone()).or_insert(claim);
+            }
+        }
+    }
+    let mut claims = claims_by_id.into_values().collect::<Vec<_>>();
+    claims.sort_by(|left, right| {
+        claim_sort_at(right)
+            .cmp(&claim_sort_at(left))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(claims)
+}
+
+fn powder_claim_from_card(value: &Value) -> Option<PowderClaim> {
+    let object = value.as_object()?;
+    let claim = object.get("claim").and_then(Value::as_object)?;
+    let agent = string_field(claim, &["agent", "assignee"])
+        .map(trimmed_owned)
+        .filter(|agent| !agent.is_empty())?;
+    let id = string_field(object, &["id", "card_id"])
+        .map(trimmed_owned)
+        .filter(|id| !id.is_empty())?;
+    let title = string_field(object, &["title", "name"])
+        .map(trimmed_owned)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| id.clone());
+    let acquired_at = timestamp_field(claim, &["acquired_at", "acquiredAt", "created_at"]);
+    let updated_at = timestamp_field(object, &["updated_at", "updatedAt", "created_at"])
+        .or_else(|| timestamp_field(claim, &["updated_at", "updatedAt", "expires_at"]))
+        .unwrap_or_else(now_seconds);
+    Some(PowderClaim {
+        id,
+        title,
+        agent,
+        acquired_at,
+        updated_at,
+    })
 }
 
 fn render_clip_queue_body(clips: &[ClipQueueItem]) -> Result<String> {
@@ -2570,24 +3068,32 @@ async fn verify_surface_contract(client: &reqwest::Client, base_url: &str) -> Re
 const AESTHETIC_CSS: &str = include_str!("../assets/aesthetic.css");
 
 const VIEWER_STYLE: &str = r#"
-.glass-wall { margin-bottom: var(--ae-space-7); }
-.glass-wall:empty { display: none; }
-.glass-dead { margin: 0 0 var(--ae-space-7); }
-.glass-dead summary { cursor: pointer; color: var(--ae-ink-muted); font-size: 13px; }
-.glass-dead-list { display: grid; gap: var(--ae-space-2); margin-top: var(--ae-space-3); }
+.glass-desk-header { margin-bottom: var(--ae-space-6); }
+.glass-desk-header:empty { display: none; }
+.glass-now-stats { margin-bottom: 2em; }
+.glass-now-notices { display: grid; gap: var(--ae-space-2); margin-bottom: var(--ae-space-5); }
+.glass-now-notice { border: 1px solid var(--ae-line); color: var(--ae-ink-muted); padding: var(--ae-space-3) var(--ae-space-4); font-size: 13px; }
+.glass-now-section { margin-bottom: var(--ae-space-7); }
+.glass-now-section[hidden] { display: none; }
+.glass-now-section > .ae-h { margin-top: 0; }
+.glass-wall { margin-bottom: 1.2em; }
+.glass-wall .ae-wall-card { color: inherit; text-decoration: none; }
+.glass-wall .ae-item { font-family: var(--ae-font-mono); font-weight: var(--ae-w-black); }
+.glass-wall .ae-wall-card:hover .ae-item { text-decoration: underline; text-underline-offset: 0.18em; }
+.mk-quiet-card .ae-wall-mark,
+.mk-quiet-card .ae-item,
+.mk-quiet-card .ae-wall-meta { color: var(--ae-ink-faint); }
+.mk-kind { white-space: nowrap; }
+.glass-wall-empty,
+.glass-wire-empty { color: var(--ae-ink-muted); padding: var(--ae-space-7) 0; text-align: center; }
+.glass-dead { margin: calc(-1 * var(--ae-space-4)) 0 var(--ae-space-7); }
+.glass-dead[hidden] { display: none; }
+.glass-dead-list { display: grid; gap: var(--ae-space-2); }
 .glass-dead-list a { color: var(--ae-ink-muted); text-decoration: none; }
 .glass-dead-list a:hover { color: var(--ae-ink); }
-.glass-feed { display: grid; gap: var(--ae-space-3); }
-.glass-feed-row { border: 1px solid var(--ae-line); background: var(--ae-surface); }
-.glass-feed-main { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ae-space-3); padding: var(--ae-space-4) var(--ae-space-5); border: 0; background: transparent; color: var(--ae-ink); text-align: left; cursor: pointer; }
-.glass-feed-line { display: flex; align-items: center; gap: var(--ae-space-3); min-width: 0; }
-.glass-feed-title { font-weight: var(--ae-w-medium); overflow-wrap: anywhere; }
-.glass-feed-summary { color: var(--ae-ink-muted); overflow-wrap: anywhere; }
-.glass-feed-chip { flex: none; border: 1px solid var(--ae-line); padding: 2px 7px; font-family: var(--ae-font-mono); font-size: 11px; line-height: 1.4; text-transform: uppercase; color: var(--ae-ink-muted); }
-.glass-feed-chip-shipped { color: var(--ae-ok); }
-.glass-feed-chip-blocked { color: var(--ae-err); }
-.glass-feed-chip-question { color: var(--ae-warn); }
-.glass-feed-chip-release { color: var(--ae-accent); }
+.glass-wire { margin-bottom: var(--ae-space-7); }
+.glass-wire .ae-list-row { cursor: pointer; }
+.glass-wire .ae-list-row:hover .glass-wire-event { text-decoration: underline; text-underline-offset: 0.18em; }
 .glass-feed-meta { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); }
 .glass-feed-links { display: flex; flex-wrap: wrap; gap: var(--ae-space-2); padding: 0 var(--ae-space-5) var(--ae-space-4); }
 .glass-feed-link { border: 1px solid var(--ae-line); padding: 2px 8px; color: var(--ae-ink-muted); text-decoration: none; font-size: 12px; }
@@ -2608,20 +3114,28 @@ const VIEWER_STYLE: &str = r#"
 .glass-metric-value { font-family: var(--ae-font-mono); font-weight: var(--ae-w-black); font-variant-numeric: tabular-nums; }
 .glass-metric-label { color: var(--ae-ink-muted); }
 .glass-empty { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-.glass-desk-header { margin-bottom: var(--ae-space-6); }
 #feed-dialog { max-width: 720px; width: min(92vw, 720px); }
 @media (max-width: 48rem) {
   .glass-surface iframe { min-height: 200px; }
-  .glass-feed-main { padding: var(--ae-space-4); }
-  .glass-feed-links { padding: 0 var(--ae-space-4) var(--ae-space-4); }
+  .glass-now-stats { margin-bottom: 1.6em; }
+  .glass-wire-event { grid-column: 1 / -1; }
+  .glass-feed-links { padding: 0; }
 }
 "#;
 
 const VIEWER_BODY: &str = r#"
     <div id="desk-header" class="glass-desk-header"></div>
-    <section id="feed" class="glass-feed" aria-label="Ambient evidence feed"></section>
-    <section id="wall" class="ae-wall glass-wall" aria-label="Live sessions"></section>
-    <details id="dead" class="glass-dead" hidden></details>
+    <div id="now-stats" class="ae-stat-badges glass-now-stats" aria-label="Now summary"></div>
+    <div id="now-notices" class="glass-now-notices" aria-live="polite"></div>
+    <section id="wall-section" class="glass-now-section" aria-label="Fleet wall">
+      <p class="ae-h">ON STAGE</p>
+      <div id="wall" class="ae-wall glass-wall"></div>
+    </section>
+    <details id="dead" class="ae-fold glass-dead" hidden></details>
+    <section id="wire-section" class="glass-now-section" aria-label="The wire">
+      <p class="ae-h">THE WIRE</p>
+      <div id="feed" class="ae-list-rows glass-wire" aria-label="Ambient evidence feed"></div>
+    </section>
     <section id="posts" aria-label="Status feed"><p class="glass-empty">No live surfaces yet.</p></section>
 <dialog id="feed-dialog" class="ae-dialog">
   <div id="feed-dialog-body"></div>
@@ -2660,7 +3174,7 @@ function catFor(agent) {
 function fetchUrl() {
   if (view.agent) return `/api/posts/recent?agent=${encodeURIComponent(view.agent)}`;
   if (view.session) return `/api/posts/recent?sessionId=${encodeURIComponent(view.session)}`;
-  return '/api/feed/recent?limit=80';
+  return '/api/now';
 }
 
 function safeHref(url) {
@@ -2689,34 +3203,150 @@ function eventTime(ts) {
   return new Date((ts || 0) * 1000).toLocaleString();
 }
 
-function buildFeedRow(event) {
-  const kind = kindLabel(event.kind);
-  const actor = event.agent || event.source || 'glass';
-  const source = event.sessionTitle || event.source || '';
-  return `<article class="glass-feed-row" data-feed-id="${esc(event.id)}">
-    <button type="button" class="glass-feed-main" data-feed-open="${esc(event.id)}">
-      <span class="glass-feed-line">
-        <span class="glass-feed-chip glass-feed-chip-${esc(kind)}">${esc(kind)}</span>
-        <span class="glass-feed-title">${esc(event.title)}</span>
-      </span>
-      <span class="glass-feed-summary">${esc(event.summary)}</span>
-      <span class="glass-feed-meta">${esc(actor)}${source ? ' · ' + esc(source) : ''} · ${esc(eventTime(event.occurredAt))}</span>
-    </button>
-    <div class="glass-feed-links">${evidenceLinksHtml(event.evidenceLinks || [])}</div>
-  </article>`;
+function eventTimeShort(ts) {
+  return new Date((ts || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function renderFeed(host, events, landmark) {
+function ageLabel(seconds) {
+  if (seconds === null || seconds === undefined) return 'now';
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+function catForKind(kind) {
+  return {
+    blocked: 0,
+    shipped: 1,
+    question: 2,
+    release: 3,
+    report: 4,
+    note: 5,
+    receipt: 6,
+    digest: 7,
+  }[kindLabel(kind)] ?? 4;
+}
+
+function iconCheck(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg>`;
+}
+
+function iconTick(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>`;
+}
+
+function iconWarn(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>`;
+}
+
+function iconQuiet(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"></path><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"></path><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"></path><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"></path><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"></path><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"></path><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"></path><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"></path></svg>`;
+}
+
+function wallMark(card) {
+  if (card.status === 'warn') return iconWarn('ae-warn ae-wall-mark');
+  if (card.status === 'quiet') return iconQuiet('ae-wall-mark');
+  return iconCheck('ae-ok ae-wall-mark');
+}
+
+function traceMark(item) {
+  return kindLabel(item.kind) === 'blocked' ? iconWarn('ae-warn') : iconTick('');
+}
+
+function primaryEventHref(event) {
+  if (event.sessionId && event.postId) {
+    return `/session/${encodeURIComponent(event.sessionId)}/p/${encodeURIComponent(event.postId)}`;
+  }
+  const link = (event.evidenceLinks || []).find(link => link && link.url);
+  return link ? safeHref(link.url) : '#';
+}
+
+function renderStats(stats) {
+  const host = document.getElementById('now-stats');
+  const s = stats || {};
+  const need = s.needYouCount;
+  host.innerHTML = `
+    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.agentsLive ?? 0)}</span><span class="ae-stat-label">agents live</span></span>
+    <span class="ae-stat-badge">${need ? iconWarn('ae-warn') : ''}<span class="ae-stat-value">${esc(need ?? 'n/a')}</span><span class="ae-stat-label">need you</span></span>
+    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.postsToday ?? 0)}</span><span class="ae-stat-label">posts today</span></span>
+    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.sessionsToday ?? 0)}</span><span class="ae-stat-label">sessions</span></span>
+    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.secondsSinceLastEvent === null || s.secondsSinceLastEvent === undefined ? 'none' : ageLabel(s.secondsSinceLastEvent))}</span><span class="ae-stat-label">since last event</span></span>`;
+}
+
+function renderNotices(notices) {
+  const host = document.getElementById('now-notices');
+  const items = notices || [];
+  host.hidden = !items.length;
+  host.innerHTML = items.map(notice => `<p class="glass-now-notice">${esc(notice.message || '')}</p>`).join('');
+}
+
+function buildWallCard(card) {
+  const tag = card.powderTag ? `<span class="ae-tag">${esc(card.powderTag)}</span>` : '';
+  const trace = (card.trace || []).map(traceMark).join('');
+  return `<a class="ae-wall-card${card.quiet ? ' mk-quiet-card' : ''}" href="${esc(safeHref(card.href || `/agent/${encodeURIComponent(card.agent || 'agent')}`))}">
+    <span>
+      <span class="ae-wall-head">${wallMark(card)}<span class="ae-item">${esc(card.agent || 'agent')}</span>${tag}</span>
+      <span class="ae-wall-meta">${esc(card.meta || '')}</span>
+    </span>
+    <span class="ae-wall-figure"><span class="ae-wall-time">${esc(ageLabel(card.ageSeconds))}</span>${trace ? `<span class="ae-wall-trace">${trace}</span>` : ''}</span>
+  </a>`;
+}
+
+function renderNowWall(cards) {
+  const wall = document.getElementById('wall');
+  const items = cards || [];
+  if (!items.length) {
+    wall.innerHTML = `<p class="glass-wall-empty">Nothing on stage. Agents appear here when they claim a Powder card or publish &mdash; <a href="/setup">Wire an agent</a> shows how.</p>`;
+    return;
+  }
+  wall.innerHTML = items.map(buildWallCard).join('');
+}
+
+function renderDead(dead) {
+  const host = document.getElementById('dead');
+  if (!dead || !dead.sessionCount) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  const rows = (dead.sessions || []).map(session => `<a href="${esc(safeHref(session.href))}">${esc(session.agent)} · ${esc(session.title)} · ${esc(ageLabel(session.ageSeconds))}</a>`).join('');
+  host.innerHTML = `<summary><span class="ae-dim">FINISHED IN THE LAST 24H</span><span class="ae-dim">${esc(dead.agentCount)} agents · ${esc(dead.sessionCount)} sessions &rarr;</span></summary><div class="glass-dead-list">${rows}</div>`;
+}
+
+function landmarkLine(landmark) {
+  if (!landmark) return '';
+  const message = landmark.message ? ` - ${landmark.message}` : '';
+  return ` Landmark: ${landmark.status || 'unknown'}${message}.`;
+}
+
+function buildWireRow(event) {
+  const kind = kindLabel(event.kind);
+  const actor = event.agent || event.source || 'glass';
+  return `<a class="ae-list-row" href="${esc(primaryEventHref(event))}" data-feed-open="${esc(event.id)}">
+    <span class="ae-list-cell ae-list-time"><span class="ae-list-label">TIME</span><span class="ae-list-value">${esc(eventTimeShort(event.occurredAt))}</span></span>
+    <span class="ae-list-cell"><span class="ae-list-label">AGENT</span><span class="ae-list-value">${esc(actor)}</span></span>
+    <span class="ae-list-cell"><span class="ae-list-label">KIND</span><span class="ae-list-value mk-kind"><span class="ae-chip ae-cat-${catForKind(kind)}">${esc(kind)}</span></span></span>
+    <span class="ae-list-cell glass-wire-event"><span class="ae-list-label">EVENT</span><span class="ae-list-value">${esc(event.title || event.summary || '')}</span></span>
+  </a>`;
+}
+
+function renderWire(host, events, landmark) {
   const feed = events || [];
   currentFeedEvents = new Map(feed.map(event => [event.id, event]));
   if (!feed.length) {
-    const landmarkText = landmark && landmark.status === 'error' ? ` Landmark: ${landmark.message || 'unavailable'}.` : '';
-    host.innerHTML = `<p class="glass-empty">No ambient evidence yet.${esc(landmarkText)}</p>`;
+    host.innerHTML = `<p class="glass-wire-empty">No ambient evidence yet.${esc(landmarkLine(landmark))}</p>`;
     return;
   }
-  host.innerHTML = feed.map(buildFeedRow).join('');
-  host.querySelectorAll('[data-feed-open]').forEach(button => {
-    button.addEventListener('click', () => openFeedDetail(button.getAttribute('data-feed-open')));
+  host.innerHTML = feed.map(buildWireRow).join('');
+  host.querySelectorAll('[data-feed-open]').forEach(row => {
+    row.addEventListener('click', event => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      openFeedDetail(row.getAttribute('data-feed-open'));
+    });
   });
 }
 
@@ -2816,59 +3446,42 @@ function renderDeskHeader() {
     const session = currentSessions.get(view.session);
     host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Ambient feed</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
   } else {
-    host.innerHTML = `<h1 class="ae-strong">Ambient feed</h1>`;
+    host.innerHTML = '';
   }
 }
 
-/* Dead sessions (no post in LIVE_WINDOW_SECONDS) are demoted out of the
-   primary wall into a collapsed archive; they never render as peers of
-   live work. */
-function renderWall(sessions, posts) {
-  const wall = document.getElementById('wall');
-  const dead = document.getElementById('dead');
-  if (view.agent || view.session) {
-    wall.innerHTML = '';
-    dead.hidden = true;
-    return;
-  }
-  const latestBySession = new Map();
-  for (const post of posts) {
-    if (!latestBySession.has(post.session_id)) latestBySession.set(post.session_id, post);
-  }
-  const withPosts = sessions.filter(session => latestBySession.has(session.id));
-  const live = withPosts.filter(session => session.isLive).sort((a, b) => b.last_active_at - a.last_active_at);
-  const stale = withPosts.filter(session => !session.isLive).sort((a, b) => b.last_active_at - a.last_active_at);
-  wall.innerHTML = live.map(session => {
-    const post = latestBySession.get(session.id);
-    return `<a class="ae-wall-card" href="/session/${encodeURIComponent(session.id)}">
-      <div>
-        <div class="ae-wall-head"><span class="ae-chip ae-cat-${catFor(session.agent)}">${esc(session.agent)}</span></div>
-        <div class="ae-wall-meta">${esc(session.title)} · ${esc(post.title)}</div>
-      </div>
-      <div class="ae-wall-figure"><span class="ae-wall-time">${new Date(post.updated_at * 1000).toLocaleTimeString()}</span></div>
-    </a>`;
-  }).join('');
-  if (stale.length) {
-    dead.hidden = false;
-    dead.innerHTML = `<summary>Dead sessions (${stale.length})</summary><div class="glass-dead-list">${stale.map(session => `<a href="/session/${encodeURIComponent(session.id)}">${esc(session.agent)} · ${esc(session.title)}</a>`).join('')}</div>`;
-  } else {
+function setNowHidden(hidden) {
+  ['now-stats', 'now-notices', 'wall-section', 'wire-section'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = hidden;
+  });
+  if (hidden) {
+    const dead = document.getElementById('dead');
     dead.hidden = true;
     dead.innerHTML = '';
   }
 }
 
+function renderNow(data) {
+  setNowHidden(false);
+  document.getElementById('posts').hidden = true;
+  renderStats(data.stats || {});
+  renderNotices(data.notices || []);
+  renderNowWall(data.wall || []);
+  renderDead(data.dead || {});
+  renderWire(document.getElementById('feed'), data.wire || [], data.landmark || null);
+}
+
 function render(data) {
-  currentSessions = new Map((data.sessions || []).map(session => [session.id, session]));
-  renderDeskHeader();
-  renderWall(data.sessions || [], data.posts || []);
-  const feedHost = document.getElementById('feed');
   const postsHost = document.getElementById('posts');
   if (ambient()) {
-    feedHost.hidden = false;
-    postsHost.hidden = true;
-    renderFeed(feedHost, data.events || [], data.landmark || null);
+    currentSessions = new Map();
+    renderDeskHeader();
+    renderNow(data);
   } else {
-    feedHost.hidden = true;
+    currentSessions = new Map((data.sessions || []).map(session => [session.id, session]));
+    renderDeskHeader();
+    setNowHidden(true);
     postsHost.hidden = false;
     renderPosts(postsHost, data.posts || []);
   }
