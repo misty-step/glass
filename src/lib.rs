@@ -1337,8 +1337,8 @@ async fn clips_page(State(glass): State<Glass>) -> Result<Html<String>, ApiError
         active: Some(shell::Place::Clips),
         needs_you_count: needs_you::awaiting_input_count().await,
         sanctum_url: &sanctum_url(),
-        styles: CLIPS_STYLE,
-        body: &CLIPS_BODY.replace("{{BODY}}", &body),
+        styles: "",
+        body: &body,
         scripts: "",
     })))
 }
@@ -1673,7 +1673,9 @@ fn render_clip_queue_body(clips: &[ClipQueueItem]) -> Result<String> {
         heading: "Review candidates".to_string(),
         columns,
         rows,
-        empty_note: (clips.is_empty()).then(|| "No clips captured yet.".to_string()),
+        empty_note: (clips.is_empty()).then(|| {
+            "No clips captured yet. Capture with MCP capture_clip or POST /api/clips.".to_string()
+        }),
         demoted_note: None,
     });
     let components = vec![hero, table];
@@ -2306,12 +2308,6 @@ fn escape_html(raw: &str) -> String {
 }
 
 const SANDBOX_CSP: &str = "sandbox allow-scripts allow-forms allow-popups; default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src https: data: blob:; media-src https: data: blob:";
-
-const CLIPS_STYLE: &str = r#"
-.clips-shell { max-width: 960px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-"#;
-
-const CLIPS_BODY: &str = r#"<div class="clips-shell">{{BODY}}</div>"#;
 
 #[derive(Debug)]
 pub struct ApiError {

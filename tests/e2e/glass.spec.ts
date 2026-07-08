@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+const powderBaseUrl = `http://127.0.0.1:${process.env.GLASS_E2E_POWDER_PORT || "19042"}`;
+
+test.beforeEach(async () => {
+  await fetch(`${powderBaseUrl}/__reset`, { method: "POST" });
+});
+
 async function setSystemMode(page) {
   await page.addInitScript(() => {
     try {
@@ -9,6 +15,9 @@ async function setSystemMode(page) {
 }
 
 async function expectSharedRail(page, activeName: string | null) {
+  const needsYouName = activeName?.startsWith("Needs you")
+    ? activeName
+    : "Needs you · 2";
   const shell = page.locator(".ae-shell");
   const rail = page.locator(".ae-rail");
   const desk = page.locator(".ae-desk");
@@ -22,9 +31,10 @@ async function expectSharedRail(page, activeName: string | null) {
     "href",
     "/",
   );
-  await expect(
-    rail.getByRole("link", { name: "Needs you · 2" }),
-  ).toHaveAttribute("href", "/needs-you");
+  await expect(rail.getByRole("link", { name: needsYouName })).toHaveAttribute(
+    "href",
+    "/needs-you",
+  );
   await expect(rail.getByRole("link", { name: "Reports" })).toHaveAttribute(
     "href",
     "/rep1",
@@ -47,10 +57,13 @@ async function expectSharedRail(page, activeName: string | null) {
   }
 
   const mode = rail.locator(".ae-mode");
-  await expect(mode).toHaveAttribute("data-mode", "system");
-  await mode.click();
-  await expect(mode).toHaveAttribute("data-mode", "dark");
-  await expect(page.locator("html")).toHaveClass(/dark/);
+  const modeState = await mode.getAttribute("data-mode");
+  expect(["system", "dark", "light"]).toContain(modeState);
+  if (modeState === "system") {
+    await mode.click();
+    await expect(mode).toHaveAttribute("data-mode", "dark");
+    await expect(page.locator("html")).toHaveClass(/dark/);
+  }
 }
 
 test("viewer renders seeded posts, theme modes, and sandboxed iframe", async ({
@@ -166,6 +179,50 @@ test("shared shell rail renders on every human HTML route", async ({ page }) => 
   expect(detailHref).toBeTruthy();
   await page.goto(detailHref!);
   await expectSharedRail(page, "Now");
+});
+
+test("needs-you renders mock Powder asks and relays an answer", async ({
+  page,
+}) => {
+  await setSystemMode(page);
+  await page.goto("/needs-you");
+  await expectSharedRail(page, "Needs you · 2");
+
+  await expect(page.locator("#ny-body > .ae-h")).toHaveText(
+    "WAITING ON YOU · 2",
+  );
+  await expect(page.locator(".ny-row")).toHaveCount(2);
+  await expect(page.locator(".ny-row").first().locator(".ae-item")).toHaveText(
+    "DECIDE: keep the rail active on viewer drill-downs?",
+  );
+  await expect(page.locator(".ny-row").first().locator(".ae-dim")).toContainText(
+    "glass-931-codex · powder glass-931 · asked",
+  );
+
+  await page.locator(".ny-row").first().getByRole("button", { name: "Answer" }).click();
+  const dialog = page.locator("#ny-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.locator("textarea").fill("Keep it active.");
+  await dialog.getByRole("button", { name: "Answer" }).click();
+
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("#ny-body > .ae-h")).toHaveText(
+    "WAITING ON YOU · 1",
+  );
+  await expectSharedRail(page, "Needs you · 1");
+  await expect(page.locator("details.ae-fold")).toContainText("ANSWERED");
+});
+
+test("clips renders in the shared shell with honest empty capture guidance", async ({
+  page,
+}) => {
+  await setSystemMode(page);
+  await page.goto("/clips");
+  await expectSharedRail(page, "Clips");
+  await expect(page.getByText("Clip review queue")).toBeVisible();
+  await expect(page.getByText("No clips captured yet")).toBeVisible();
+  await expect(page.getByText("MCP capture_clip")).toBeVisible();
+  await expect(page.getByText("POST /api/clips")).toBeVisible();
 });
 
 test("shared rail becomes bottom chrome at 390px", async ({ page }) => {
