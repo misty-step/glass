@@ -3,21 +3,61 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ReportComponent {
-    StatBand { figures: Vec<Figure> },
-    Spark { series: Vec<SeriesPoint> },
-    Bars { series: Vec<SeriesPoint> },
-    Meters { pairs: Vec<MeterPair> },
-    Pipeline { stages: Vec<PipelineStage> },
-    Trail { events: Vec<TrailEvent> },
-    Callouts { lines: Vec<StatusLine> },
-    EvidenceChips { links: Vec<EvidenceLink> },
-    DiffExhibit { file: String, lines: Vec<DiffLine> },
-    TerminalExhibit { lines: Vec<String> },
-    PullQuote { text: String, by: Option<String> },
-    BadgeRow { badges: Vec<Badge> },
-    IconRow { rows: Vec<IconRowItem> },
-    Prose { text: String },
-    FigCaption { text: String },
+    Hero {
+        kicker: String,
+        headline: String,
+        figures: Vec<Figure>,
+        trend: Vec<SeriesPoint>,
+        #[serde(default)]
+        peak_label: Option<String>,
+    },
+    StatBand {
+        figures: Vec<Figure>,
+    },
+    Spark {
+        series: Vec<SeriesPoint>,
+    },
+    Bars {
+        series: Vec<SeriesPoint>,
+    },
+    Meters {
+        pairs: Vec<MeterPair>,
+    },
+    Pipeline {
+        stages: Vec<PipelineStage>,
+    },
+    Trail {
+        events: Vec<TrailEvent>,
+    },
+    Callouts {
+        lines: Vec<StatusLine>,
+    },
+    EvidenceChips {
+        links: Vec<EvidenceLink>,
+    },
+    DiffExhibit {
+        file: String,
+        lines: Vec<DiffLine>,
+    },
+    TerminalExhibit {
+        lines: Vec<String>,
+    },
+    PullQuote {
+        text: String,
+        by: Option<String>,
+    },
+    BadgeRow {
+        badges: Vec<Badge>,
+    },
+    IconRow {
+        rows: Vec<IconRowItem>,
+    },
+    Prose {
+        text: String,
+    },
+    FigCaption {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +162,13 @@ pub(crate) fn render_components(components: &[ReportComponent]) -> String {
 
 pub(crate) fn render_component(component: &ReportComponent) -> String {
     match component {
+        ReportComponent::Hero {
+            kicker,
+            headline,
+            figures,
+            trend,
+            peak_label,
+        } => hero(kicker, headline, figures, trend, peak_label.as_deref()),
         ReportComponent::StatBand { figures } => stat_band(figures),
         ReportComponent::Spark { series } => spark(series),
         ReportComponent::Bars { series } => bars(series),
@@ -138,6 +185,38 @@ pub(crate) fn render_component(component: &ReportComponent) -> String {
         ReportComponent::Prose { text } => prose(text),
         ReportComponent::FigCaption { text } => fig_caption(text),
     }
+}
+
+fn hero(
+    kicker: &str,
+    headline: &str,
+    figures: &[Figure],
+    trend: &[SeriesPoint],
+    peak_label: Option<&str>,
+) -> String {
+    let trend_html = hero_trend(trend, peak_label);
+    format!(
+        r#"<header class="glass-rep-hero"><p class="ae-plate-cap">{kicker}</p><h2>{headline}</h2>{stats}{trend_html}</header>"#,
+        kicker = html_escape(kicker),
+        headline = html_escape(headline),
+        stats = stat_band(figures),
+    )
+}
+
+fn hero_trend(series: &[SeriesPoint], peak_label: Option<&str>) -> String {
+    if series.is_empty() {
+        return String::new();
+    }
+    let points = spark_points(series);
+    let aria = series_aria_label(series);
+    let peak = peak_label
+        .map(str::to_string)
+        .unwrap_or_else(|| default_peak_label(series));
+    format!(
+        r#"<div class="glass-rep-hero-trend"><span class="ae-h">VELOCITY</span><svg class="ae-spark glass-rep-sparkline glass-rep-hero-spark" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label="{aria}"><polyline points="{points}"></polyline></svg><span class="ae-dim">{peak}</span></div>"#,
+        aria = html_escape(&aria),
+        peak = html_escape(&peak),
+    )
 }
 
 fn stat_band(figures: &[Figure]) -> String {
@@ -159,35 +238,8 @@ fn spark(series: &[SeriesPoint]) -> String {
     if series.is_empty() {
         return r#"<div class="glass-rep-empty">No series.</div>"#.to_string();
     }
-    let min = series
-        .iter()
-        .map(|point| point.value)
-        .fold(f64::INFINITY, f64::min);
-    let max = series
-        .iter()
-        .map(|point| point.value)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let span = if (max - min).abs() < f64::EPSILON {
-        1.0
-    } else {
-        max - min
-    };
-    let denom = (series.len().saturating_sub(1)).max(1) as f64;
-    let points = series
-        .iter()
-        .enumerate()
-        .map(|(index, point)| {
-            let x = index as f64 / denom * 100.0;
-            let y = 21.0 - ((point.value - min) / span) * 18.0;
-            format!("{x:.2},{y:.2}")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let label = series
-        .iter()
-        .map(|point| format!("{} {}", point.label, compact_number(point.value)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let points = spark_points(series);
+    let label = series_aria_label(series);
     format!(
         r#"<figure class="glass-rep-figure glass-rep-spark"><svg class="ae-spark glass-rep-sparkline" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label="{label}"><polyline points="{points}"></polyline></svg></figure>"#,
         label = html_escape(&label),
@@ -483,6 +535,53 @@ fn compact_number(value: f64) -> String {
     }
 }
 
+fn spark_points(series: &[SeriesPoint]) -> String {
+    let min = series
+        .iter()
+        .map(|point| point.value)
+        .fold(f64::INFINITY, f64::min);
+    let max = series
+        .iter()
+        .map(|point| point.value)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let span = if (max - min).abs() < f64::EPSILON {
+        1.0
+    } else {
+        max - min
+    };
+    let denom = (series.len().saturating_sub(1)).max(1) as f64;
+    series
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let x = index as f64 / denom * 100.0;
+            let y = 21.0 - ((point.value - min) / span) * 18.0;
+            format!("{x:.2},{y:.2}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn series_aria_label(series: &[SeriesPoint]) -> String {
+    series
+        .iter()
+        .map(|point| format!("{} {}", point.label, compact_number(point.value)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn default_peak_label(series: &[SeriesPoint]) -> String {
+    series
+        .iter()
+        .max_by(|left, right| {
+            left.value
+                .partial_cmp(&right.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|point| format!("peak {} - {}", compact_number(point.value), point.label))
+        .unwrap_or_else(|| "peak n/a".to_string())
+}
+
 impl PipelineState {
     fn as_str(self) -> &'static str {
         match self {
@@ -547,6 +646,11 @@ fn html_attr_escape(raw: &str) -> String {
 }
 
 pub(crate) const STYLE: &str = r#"
+.glass-rep-hero { display: grid; gap: var(--ae-space-4); padding-bottom: var(--ae-space-5); border-bottom: 1px solid var(--ae-line); }
+.glass-rep-hero h2 { margin: 0; font-size: clamp(1.5rem, 2.5vw, 2.4rem); line-height: 1.05; letter-spacing: 0; }
+.glass-rep-hero .glass-rep-stat-band { margin: 0; }
+.glass-rep-hero-trend { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--ae-space-3); }
+.glass-rep-hero-spark { height: 3.4em; }
 .glass-rep-stat-band { margin: var(--ae-space-4) 0; }
 .glass-rep-stat.is-warn .ae-num { color: var(--ae-warn); }
 .glass-rep-figure { margin: 1.4em 0; min-width: 0; }
@@ -605,6 +709,7 @@ pub(crate) const STYLE: &str = r#"
 .glass-rep-caption { margin-top: 1.6em; padding-top: 1em; border-top: 1px solid var(--ae-line); font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--ae-ink-faint); }
 .glass-rep-empty { color: var(--ae-ink-muted); font-size: 13px; }
 @media (max-width: 48rem) {
+  .glass-rep-hero-trend { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .glass-rep-pipeline { grid-auto-flow: row; }
   .glass-rep-stage { flex-direction: row; align-items: baseline; gap: 0.6em; border-left: 0; border-top: 1px solid var(--ae-line); }
   .glass-rep-stage:first-child { border-top: 0; }
@@ -619,6 +724,33 @@ mod tests {
 
     fn sample_components() -> Vec<ReportComponent> {
         vec![
+            ReportComponent::Hero {
+                kicker: "FLEET DIGEST - PAST 24H - BRIEF".to_string(),
+                headline: "The fleet moved.".to_string(),
+                figures: vec![
+                    Figure {
+                        value: "12".to_string(),
+                        label: "completed".to_string(),
+                        warn: false,
+                    },
+                    Figure {
+                        value: "1".to_string(),
+                        label: "blocked".to_string(),
+                        warn: true,
+                    },
+                ],
+                trend: vec![
+                    SeriesPoint {
+                        label: "10".to_string(),
+                        value: 2.0,
+                    },
+                    SeriesPoint {
+                        label: "11".to_string(),
+                        value: 4.0,
+                    },
+                ],
+                peak_label: Some("peak 4 - 11".to_string()),
+            },
             ReportComponent::StatBand {
                 figures: vec![
                     Figure {
@@ -755,6 +887,7 @@ mod tests {
     #[test]
     fn component_list_renders_every_kind_snapshot() {
         let html = render_components(&sample_components());
+        assert!(html.contains("glass-rep-hero"));
         assert!(html.contains("glass-rep-stat-band"));
         assert!(html.contains("glass-rep-sparkline"));
         assert!(html.contains("glass-rep-bars"));
@@ -775,12 +908,14 @@ mod tests {
     #[test]
     fn serde_component_list_round_trips_from_generating_models() {
         let raw = serde_json::json!([
+            {"kind":"hero","kicker":"FLEET DIGEST - PAST 24H - BRIEF","headline":"A digest.","figures":[{"value":"2","label":"done"}],"trend":[{"label":"10","value":2}],"peak_label":"peak 2 - 10"},
             {"kind":"stat_band","figures":[{"value":"2","label":"done"}]},
             {"kind":"prose","text":"No wall of prose."}
         ]);
         let components: Vec<ReportComponent> =
             serde_json::from_value(raw).expect("component list shape");
-        assert_eq!(components.len(), 2);
+        assert_eq!(components.len(), 3);
+        assert!(render_components(&components).contains("glass-rep-hero"));
         assert!(render_components(&components).contains("No wall of prose."));
     }
 

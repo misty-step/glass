@@ -47,17 +47,20 @@ kind). Needs You ships as-is (locked at its current baseline).
   slot tokens: "Show me [the whole fleet] over [the past 24h]". Report
   renders beneath, immediately. Cache note reads quietly
   ("cached · generated 18:28").
-- **Report document — round 3 open.** Whatever composition wins
-  (DOC-13…18), the invariant is ratified: the synthesis is COMPOSED
-  GENERATIVE UI assembled from a component library — stat bands,
-  sparks/bars/meters, pipeline flows, trails, diff/terminal/code
-  exhibits, badges, callouts, icon rows — with deliberate rhythm.
-  Never a prose wall. The synthesizing model picks and fills
-  components; deterministic code owns the component renderers.
-- **Agent page — round 2 open.** It is a scoped composition of the same
-  primitives (state header + scoped wire + scoped report entry), never
-  a bespoke surface. Arrangement (stacked / tabs / side-by-side /
-  overlay) pending verdict.
+- **Report document — `DOC-13`.** The instrument brief: hero band with
+  kicker (`kind · window · BRIEF`), headline, stat band, and velocity
+  spark with peak label; then strict prose→instrument alternation per
+  theme. Velocity themes prove through pipeline flows, data-bearing
+  themes use diff/terminal exhibits when available, risk themes use
+  callout bands, and themes without a richer instrument use evidence
+  chips. Close with ratified decisions as icon rows and a quiet
+  provenance figcaption. The synthesis is COMPOSED GENERATIVE UI
+  assembled from the component library — never a prose wall.
+- **Agent page — `AGENT-8`.** Header + `.ae-tabs`: a state header
+  (agent name, Powder card tag when claimed, glyph/state line, age),
+  then Wire | Report tabs. Wire is the WIRE-10 tape scoped to the agent
+  with blocked/questions pinned. Report is the REP-8 sentence builder
+  locked to the agent scope and renders in place.
 
 ## Standing rules from the rounds
 

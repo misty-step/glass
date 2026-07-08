@@ -64,6 +64,20 @@ The `/reports` generative-UI contract is a serde-deserializable component list:
 {
   "components": [
     {
+      "kind": "hero",
+      "kicker": "ACTIVITY DIGEST · past 24h · BRIEF",
+      "headline": "The fleet moved through the window with one live risk.",
+      "figures": [
+        { "value": "58", "label": "completed cards" },
+        { "value": "1", "label": "blocked", "warn": true }
+      ],
+      "trend": [
+        { "label": "17:00", "value": 14 },
+        { "label": "18:00", "value": 11 }
+      ],
+      "peak_label": "peak 14 · 17:00"
+    },
+    {
       "kind": "stat_band",
       "figures": [
         { "value": "58", "label": "completed cards" },
@@ -88,6 +102,7 @@ The `/reports` generative-UI contract is a serde-deserializable component list:
 
 Accepted component kinds and fields:
 
+- `hero`: `{ "kicker": string, "headline": string, "figures": [{ "value": string, "label": string, "warn"?: bool }], "trend": [{ "label": string, "value": number }], "peak_label"?: string }`
 - `stat_band`: `{ "figures": [{ "value": string, "label": string, "warn"?: bool }] }`
 - `spark`: `{ "series": [{ "label": string, "value": number }] }`
 - `bars`: `{ "series": [{ "label": string, "value": number }] }`
@@ -106,6 +121,21 @@ Accepted component kinds and fields:
 
 Every string is escaped by Glass before rendering. The endpoint chooses
 components and fills plain data; deterministic Rust owns the renderer.
+
+For activity digests, the endpoint should emit the DOC-13 instrument brief
+sequence. This is guidance for synthesis, not a renderer precondition: Glass
+still renders valid components in any order. The recommended sequence is:
+
+1. `hero`: kicker line (`kind · window · BRIEF`), headline, stat figures, and
+   velocity trend with `peak_label`.
+2. Theme pairs, strictly alternating claim and proof: `prose`, then the proving
+   instrument. Use `pipeline` for velocity/workflow themes; use
+   `diff_exhibit` or `terminal_exhibit` when the supplied context carries those
+   surfaces; use `callouts` for risk or human-gated themes. When the theme has
+   no richer instrument, `evidence_chips` is the proof row.
+3. `icon_row` for decisions ratified in the window.
+4. `fig_caption` as the final provenance line: window, sources, generated time,
+   and cache note.
 
 ## Streamed Response
 

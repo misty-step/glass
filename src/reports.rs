@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Result, anyhow, bail};
 use axum::Json;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -15,9 +13,9 @@ use std::time::Duration as StdDuration;
 use tracing::{info, warn};
 
 use crate::{
-    ApiError, ClipQueueItem, FeedKind, Glass, Post, Session, backlog_report, declared_summary,
-    feed_kind_for_post, needs_you, rep1, report_components as rc, review_report, sanctum_url,
-    shell,
+    ApiError, ClipQueueItem, FeedKind, Glass, Post, Session, SurfaceKind, backlog_report,
+    declared_summary, feed_kind_for_post, needs_you, rep1, report_components as rc, review_report,
+    sanctum_url, shell,
 };
 
 const REPORT_CACHE_FRESHNESS_SECONDS: i64 = 30 * 60;
@@ -830,64 +828,71 @@ fn build_activity_components(
     blocked_posts: &[ActivityPost],
 ) -> Vec<rc::ReportComponent> {
     let hourly = hourly_activity_series(window, posts, cards);
-    let repo_pairs = repo_meter_pairs(cards);
+    let evidence = activity_evidence_links(posts, cards);
     let mut components = vec![
-        rc::ReportComponent::Prose {
-            text: format!(
-                "{}: {} completed Powder card(s), {} Glass post(s), {} clip(s).",
-                window.label,
-                cards.len(),
-                posts.len(),
-                clips.len()
-            ),
-        },
-        rc::ReportComponent::StatBand {
+        rc::ReportComponent::Hero {
+            kicker: format!("{} · {} · BRIEF", "ACTIVITY DIGEST", window.label),
+            headline: activity_headline(scope, posts, cards, blocked_posts),
             figures: vec![
                 figure(cards.len(), "completed cards", false),
                 figure(posts.len(), "Glass posts", false),
                 figure(clips.len(), "clips", false),
                 figure(blocked_posts.len(), "blocked", !blocked_posts.is_empty()),
             ],
+            trend: hourly.clone(),
+            peak_label: Some(activity_peak_label(&hourly)),
         },
-        rc::ReportComponent::Bars { series: hourly },
         rc::ReportComponent::Prose {
-            text: repo_theme_sentence(scope, cards),
+            text: velocity_theme_sentence(scope, window, posts, cards, clips),
         },
-        rc::ReportComponent::Meters { pairs: repo_pairs },
-        rc::ReportComponent::EvidenceChips {
-            links: cards
-                .iter()
-                .take(6)
-                .map(|card| rc::EvidenceLink {
-                    label: card.id.clone(),
-                    href: powder_card_url(&card.id),
-                })
-                .collect(),
+        rc::ReportComponent::Pipeline {
+            stages: activity_pipeline(posts, cards, blocked_posts),
+        },
+        rc::ReportComponent::Prose {
+            text: evidence_theme_sentence(scope, posts),
+        },
+        activity_data_exhibit(posts)
+            .unwrap_or(rc::ReportComponent::EvidenceChips { links: evidence }),
+        rc::ReportComponent::Prose {
+            text: risk_theme_sentence(blocked_posts),
         },
         rc::ReportComponent::Callouts {
             lines: blocked_callouts(blocked_posts),
         },
-        rc::ReportComponent::Trail {
-            events: activity_trail(posts, cards),
-        },
     ];
-    if !clips.is_empty() {
-        components.push(rc::ReportComponent::BadgeRow {
-            badges: vec![rc::Badge {
-                label: "clips captured".to_string(),
-                value: Some(clips.len().to_string()),
-                status: Some("report".to_string()),
-            }],
-        });
-    }
+    components.push(rc::ReportComponent::IconRow {
+        rows: activity_decision_rows(scope, window, posts, cards, blocked_posts),
+    });
     components.push(rc::ReportComponent::FigCaption {
         text: format!(
-            "{} - sources: Glass wire, clips, Powder completions - cache horizon {}m",
+            "{} · sources: Glass wire, clips, Powder completions · generated {} · cached {}m",
             scope.label(),
+            format_timestamp(Utc::now().timestamp()),
             REPORT_CACHE_FRESHNESS_SECONDS / 60
         ),
     });
     components
+}
+
+fn activity_headline(
+    scope: &ReportScope,
+    posts: &[ActivityPost],
+    cards: &[PowderCard],
+    blocked_posts: &[ActivityPost],
+) -> String {
+    let movement = posts.len() + cards.len();
+    if blocked_posts.is_empty() {
+        format!(
+            "{} produced {movement} tracked signal(s) with no blocked Glass post in the window.",
+            scope.label()
+        )
+    } else {
+        format!(
+            "{} produced {movement} tracked signal(s); {} need attention.",
+            scope.label(),
+            blocked_posts.len()
+        )
+    }
 }
 
 fn figure(value: usize, label: &str, warn: bool) -> rc::Figure {
@@ -896,6 +901,18 @@ fn figure(value: usize, label: &str, warn: bool) -> rc::Figure {
         label: label.to_string(),
         warn,
     }
+}
+
+fn activity_peak_label(series: &[rc::SeriesPoint]) -> String {
+    series
+        .iter()
+        .max_by(|left, right| {
+            left.value
+                .partial_cmp(&right.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|point| format!("peak {} · {}", point.value as usize, point.label))
+        .unwrap_or_else(|| "peak n/a".to_string())
 }
 
 fn hourly_activity_series(
@@ -934,41 +951,182 @@ fn hourly_activity_series(
         .collect()
 }
 
-fn repo_meter_pairs(cards: &[PowderCard]) -> Vec<rc::MeterPair> {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for card in cards {
-        let repo = card.repo.as_deref().unwrap_or("unscoped").to_string();
-        *counts.entry(repo).or_default() += 1;
-    }
-    let mut pairs = counts.into_iter().collect::<Vec<_>>();
-    pairs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    pairs
-        .into_iter()
-        .take(8)
-        .map(|(label, value)| rc::MeterPair {
-            label,
-            value: value as f64,
-        })
-        .collect()
+fn velocity_theme_sentence(
+    scope: &ReportScope,
+    window: &ResolvedWindow,
+    posts: &[ActivityPost],
+    cards: &[PowderCard],
+    clips: &[ClipQueueItem],
+) -> String {
+    format!(
+        "{} over {} resolved into {} Glass post(s), {} completed Powder card(s), and {} clip(s); the pipeline below shows which proof lanes carried the brief.",
+        scope.label(),
+        window.label,
+        posts.len(),
+        cards.len(),
+        clips.len()
+    )
 }
 
-fn repo_theme_sentence(scope: &ReportScope, cards: &[PowderCard]) -> String {
-    let pairs = repo_meter_pairs(cards);
-    if pairs.is_empty() {
+fn activity_pipeline(
+    posts: &[ActivityPost],
+    cards: &[PowderCard],
+    blocked_posts: &[ActivityPost],
+) -> Vec<rc::PipelineStage> {
+    vec![
+        rc::PipelineStage {
+            label: "wire".to_string(),
+            state: if posts.is_empty() {
+                rc::PipelineState::Pending
+            } else {
+                rc::PipelineState::Done
+            },
+            note: Some(format!("{} post(s)", posts.len())),
+        },
+        rc::PipelineStage {
+            label: "powder".to_string(),
+            state: if cards.is_empty() {
+                rc::PipelineState::Pending
+            } else {
+                rc::PipelineState::Done
+            },
+            note: Some(format!("{} completed", cards.len())),
+        },
+        rc::PipelineStage {
+            label: "risk".to_string(),
+            state: if blocked_posts.is_empty() {
+                rc::PipelineState::Done
+            } else {
+                rc::PipelineState::Blocked
+            },
+            note: Some(if blocked_posts.is_empty() {
+                "clear".to_string()
+            } else {
+                format!("{} blocked", blocked_posts.len())
+            }),
+        },
+        rc::PipelineStage {
+            label: "brief".to_string(),
+            state: rc::PipelineState::Active,
+            note: Some("DOC-13".to_string()),
+        },
+    ]
+}
+
+fn evidence_theme_sentence(scope: &ReportScope, posts: &[ActivityPost]) -> String {
+    if let Some(kind) = activity_data_exhibit(posts)
+        .as_ref()
+        .map(component_kind_label)
+    {
         return format!(
-            "{} had no completed Powder cards in this window; the report is carried by Glass wire activity.",
+            "{} carried a concrete {kind} surface in the wire; the exhibit below is rendered from the posted payload.",
             scope.label()
         );
     }
-    let leaders = pairs
-        .iter()
-        .take(3)
-        .map(|pair| format!("{} ({})", pair.label, pair.value as usize))
-        .collect::<Vec<_>>()
-        .join(", ");
     format!(
-        "Completion activity clustered in {leaders}; these meters are computed from completed Powder cards in the selected scope."
+        "{} had no diff or terminal surface in the selected window, so the proof instrument is the bounded evidence chip row from Powder and Glass links.",
+        scope.label()
     )
+}
+
+fn component_kind_label(component: &rc::ReportComponent) -> &'static str {
+    match component {
+        rc::ReportComponent::DiffExhibit { .. } => "diff",
+        rc::ReportComponent::TerminalExhibit { .. } => "terminal",
+        _ => "evidence",
+    }
+}
+
+fn activity_evidence_links(posts: &[ActivityPost], cards: &[PowderCard]) -> Vec<rc::EvidenceLink> {
+    let mut links = cards
+        .iter()
+        .take(4)
+        .map(|card| rc::EvidenceLink {
+            label: card.id.clone(),
+            href: powder_card_url(&card.id),
+        })
+        .collect::<Vec<_>>();
+    links.extend(posts.iter().take(4).map(|item| rc::EvidenceLink {
+        label: item.post.title.clone(),
+        href: post_url(&item.post),
+    }));
+    links
+}
+
+fn activity_data_exhibit(posts: &[ActivityPost]) -> Option<rc::ReportComponent> {
+    posts
+        .iter()
+        .find_map(diff_exhibit_from_post)
+        .or_else(|| posts.iter().find_map(terminal_exhibit_from_post))
+}
+
+fn diff_exhibit_from_post(item: &ActivityPost) -> Option<rc::ReportComponent> {
+    item.post.surfaces.iter().find_map(|surface| {
+        if surface.kind != SurfaceKind::Diff {
+            return None;
+        }
+        let patch = surface.fields.get("patch").and_then(Value::as_str)?;
+        let file = surface
+            .fields
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or(&item.post.title)
+            .to_string();
+        let lines = patch
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(16)
+            .map(|line| {
+                let state = if line.starts_with('+') && !line.starts_with("+++") {
+                    rc::DiffState::Add
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    rc::DiffState::Del
+                } else {
+                    rc::DiffState::Ctx
+                };
+                rc::DiffLine {
+                    state,
+                    text: line.to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            None
+        } else {
+            Some(rc::ReportComponent::DiffExhibit { file, lines })
+        }
+    })
+}
+
+fn terminal_exhibit_from_post(item: &ActivityPost) -> Option<rc::ReportComponent> {
+    item.post.surfaces.iter().find_map(|surface| {
+        if surface.kind != SurfaceKind::Terminal {
+            return None;
+        }
+        let text = surface.fields.get("text").and_then(Value::as_str)?;
+        let lines = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(14)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            None
+        } else {
+            Some(rc::ReportComponent::TerminalExhibit { lines })
+        }
+    })
+}
+
+fn risk_theme_sentence(blocked_posts: &[ActivityPost]) -> String {
+    if blocked_posts.is_empty() {
+        "Risk stayed quiet in this window; the callout band is intentionally green rather than omitted.".to_string()
+    } else {
+        format!(
+            "{} blocked or question-shaped post(s) need operator attention; the callout band keeps them above the fold.",
+            blocked_posts.len()
+        )
+    }
 }
 
 fn blocked_callouts(posts: &[ActivityPost]) -> Vec<rc::StatusLine> {
@@ -991,38 +1149,51 @@ fn blocked_callouts(posts: &[ActivityPost]) -> Vec<rc::StatusLine> {
         .collect()
 }
 
-fn activity_trail(posts: &[ActivityPost], cards: &[PowderCard]) -> Vec<rc::TrailEvent> {
-    let mut events = Vec::new();
-    for item in posts.iter().take(8) {
-        events.push((
-            item.post.updated_at.max(item.post.created_at),
-            rc::TrailEvent {
-                time: format_clock(item.post.updated_at.max(item.post.created_at)),
-                kind: Some(feed_kind_for_post(&item.post).as_str().to_string()),
-                agent: Some(item.session.agent.clone()),
-                title: item.post.title.clone(),
-                href: Some(post_url(&item.post)),
+fn activity_decision_rows(
+    scope: &ReportScope,
+    window: &ResolvedWindow,
+    posts: &[ActivityPost],
+    cards: &[PowderCard],
+    blocked_posts: &[ActivityPost],
+) -> Vec<rc::IconRowItem> {
+    vec![
+        rc::IconRowItem {
+            icon: Some("ok".to_string()),
+            text: format!(
+                "{} uses the DOC-13 instrument brief for this generated digest.",
+                scope.label()
+            ),
+            meta: Some(window.label.clone()),
+        },
+        rc::IconRowItem {
+            icon: Some("report".to_string()),
+            text: format!(
+                "{} wire post(s) and {} Powder completion(s) were included.",
+                posts.len(),
+                cards.len()
+            ),
+            meta: Some("scope-filtered".to_string()),
+        },
+        rc::IconRowItem {
+            icon: Some(
+                if blocked_posts.is_empty() {
+                    "ok"
+                } else {
+                    "warn"
+                }
+                .to_string(),
+            ),
+            text: if blocked_posts.is_empty() {
+                "No blocked Glass posts were found in the selected window.".to_string()
+            } else {
+                format!(
+                    "{} blocked Glass post(s) remain visible as callouts.",
+                    blocked_posts.len()
+                )
             },
-        ));
-    }
-    for card in cards.iter().take(8) {
-        events.push((
-            card.activity_timestamp(),
-            rc::TrailEvent {
-                time: format_clock(card.activity_timestamp()),
-                kind: Some("receipt".to_string()),
-                agent: card.repo.clone(),
-                title: format!("{} - {}", card.id, card.title),
-                href: Some(powder_card_url(&card.id)),
-            },
-        ));
-    }
-    events.sort_by_key(|event| std::cmp::Reverse(event.0));
-    events
-        .into_iter()
-        .take(10)
-        .map(|(_, event)| event)
-        .collect()
+            meta: Some("risk band".to_string()),
+        },
+    ]
 }
 
 fn bucket_label(ts: i64) -> String {
@@ -1672,12 +1843,6 @@ fn format_generated_clock(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-fn format_clock(ts: i64) -> String {
-    DateTime::<Utc>::from_timestamp(ts, 0)
-        .map(|dt| dt.format("%H:%M").to_string())
-        .unwrap_or_else(|| ts.to_string())
-}
-
 fn cache_note(ts: i64, cached: bool) -> String {
     if cached {
         format!("cached · generated {}", format_generated_clock(ts))
@@ -1692,7 +1857,7 @@ fn timestamp_rfc3339(ts: i64) -> String {
         .to_rfc3339()
 }
 
-fn reports_styles() -> String {
+pub(crate) fn reports_styles() -> String {
     format!("{}{}", rc::STYLE, REPORTS_STYLE)
 }
 

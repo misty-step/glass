@@ -381,13 +381,80 @@ test("reports sentence builder renders and caches in place", async ({
   const report = page.locator("#reports-result .reports-doc");
   await expect(report).toContainText("Activity digest - fleet");
   await expect(report).toContainText("Rendered e2e seed");
-  await expect(report.locator(".glass-rep-stat-band")).toBeVisible();
-  await expect(report.locator(".glass-rep-bars")).toBeVisible();
+  await expect(report.locator(".glass-rep-hero")).toBeVisible();
+  await expect(report.locator(".glass-rep-pipeline")).toBeVisible();
+  await expect(report.locator(".glass-rep-callouts")).toBeVisible();
+  const docClasses = await report.locator(".reports-doc-body").evaluate((el) =>
+    Array.from(el.children).map((child) => (child as HTMLElement).className),
+  );
+  expect(docClasses[0]).toContain("glass-rep-hero");
+  expect(docClasses[1]).toContain("glass-rep-prose");
+  expect(docClasses[2]).toContain("glass-rep-pipeline");
+  expect(docClasses[3]).toContain("glass-rep-prose");
+  expect(docClasses[4]).toMatch(/glass-rep-(evidence|exhibit)/);
+  expect(docClasses[5]).toContain("glass-rep-prose");
+  expect(docClasses[6]).toContain("glass-rep-callouts");
+  expect(docClasses.at(-1)).toContain("glass-rep-caption");
   await expect(page.locator("#reports-status")).toContainText("generated");
 
   await page.getByRole("button", { name: "Run" }).click();
   await expect(page.locator("#reports-status")).toContainText("cached · generated");
   await expect(page.getByRole("button", { name: "regenerate" })).toBeVisible();
+});
+
+test("agent page renders AGENT-8 tabs and scoped reports", async ({ page }) => {
+  await setSystemMode(page);
+  await page.goto("/agent/e2e-agent");
+  await expectSharedRail(page, "Now");
+
+  await expect(page.locator("#agent-page")).toBeVisible();
+  await expect(page.locator(".glass-agent-name")).toHaveText("e2e-agent");
+  await expect(page.locator("#agent-state-head")).toContainText("powder glass-932");
+  await expect(page.locator("#agent-tab-wire")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#agent-panel-wire")).toBeVisible();
+  await expect(page.locator("#agent-panel-report")).toBeHidden();
+  await expect(page.locator("#agent-wire-feed .glass-wire-tape-row")).toHaveCount(
+    1,
+  );
+  await expect(page.locator("#agent-wire-feed")).toContainText(
+    "Rendered e2e seed",
+  );
+  await expect(page.locator("#posts")).toBeHidden();
+
+  await page.getByRole("tab", { name: "Report" }).click();
+  await expect(page).toHaveURL(/#report$/);
+  await expect(page.locator("#agent-tab-report")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#agent-panel-wire")).toBeHidden();
+  await expect(page.locator("#agent-panel-report")).toBeVisible();
+  await expect(page.locator("#agent-report-scope")).toHaveText(
+    "agent e2e-agent",
+  );
+
+  await page.locator("#agent-report-run").click();
+  const scopedReport = page.locator("#agent-report-result .reports-doc");
+  await expect(scopedReport).toContainText("Activity digest - agent e2e-agent");
+  await expect(scopedReport).toContainText("Rendered e2e seed");
+  await expect(scopedReport.locator(".glass-rep-hero")).toBeVisible();
+
+  await page.goto("/agent/e2e-agent#report");
+  await expect(page.locator("#agent-tab-report")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#agent-panel-report")).toBeVisible();
+
+  await page.goto("/agent/e2e-agent#wire");
+  await expect(page.locator("#agent-tab-wire")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#agent-panel-wire")).toBeVisible();
 });
 
 test("operator can walk every rail place from Now", async ({ page }) => {
