@@ -470,7 +470,7 @@ async fn recent_feed_projects_glass_posts_as_bridge_shaped_events() {
 }
 
 #[tokio::test]
-async fn default_view_loads_the_ambient_feed_endpoint_and_keeps_drilldowns_reachable() {
+async fn default_view_loads_the_now_endpoint_and_keeps_drilldowns_reachable() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
@@ -478,14 +478,72 @@ async fn default_view_loads_the_ambient_feed_endpoint_and_keeps_drilldowns_reach
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("Ambient feed"));
-    assert!(html.contains("/api/feed/recent?limit=80"));
+    assert!(html.contains("ON STAGE"));
+    assert!(html.contains("THE WIRE"));
+    assert!(html.contains("/api/now"));
     assert!(html.contains("/agent/"));
     assert!(html.contains("/session/"));
     assert!(html.contains("feed-dialog"));
     assert!(
         !html.contains("wait_for_feedback") && !html.contains("reply_to_user"),
         "the default feed must stay one-way"
+    );
+}
+
+#[tokio::test]
+async fn now_endpoint_renders_live_posts_in_the_wall_and_wire() {
+    let glass = Glass::memory().expect("memory store");
+    let session = glass
+        .create_session(NewSession {
+            agent: "now-agent".into(),
+            title: "now lane".into(),
+            cwd: None,
+        })
+        .expect("session");
+    glass
+        .publish_post(PublishPost {
+            session_id: Some(session.id),
+            session_title: None,
+            agent: None,
+            title: "Now proof".into(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Markdown,
+                    json!({"markdown": "proof", "feedKind": "report", "summary": "live post survives Powder down"}),
+                )
+                .expect("surface"),
+            ],
+        })
+        .expect("publish");
+
+    let response = app_router(glass)
+        .oneshot(
+            Request::builder()
+                .uri("/api/now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        value["stats"]["agentsLive"].as_u64().unwrap_or_default() >= 1,
+        "at least the local live Glass agent should be on stage: {value}"
+    );
+    let wall = value["wall"].as_array().expect("wall");
+    let card = wall
+        .iter()
+        .find(|card| card["agent"] == "now-agent")
+        .expect("now-agent wall card");
+    assert_eq!(card["meta"], "report: live post survives Powder down");
+    assert!(
+        value["wire"]
+            .as_array()
+            .expect("wire")
+            .iter()
+            .any(|event| event["title"] == "Now proof")
     );
 }
 

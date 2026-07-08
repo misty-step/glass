@@ -1,15 +1,46 @@
 import http from "node:http";
 
 const port = Number(process.env.GLASS_E2E_POWDER_PORT || 19042);
+const now = Math.floor(Date.now() / 1000);
 
 const cards = [
+  {
+    id: "glass-932",
+    title: "Now fleet wall from Powder claims and live sessions",
+    status: "running",
+    priority: "p1",
+    repo: "glass",
+    blocked_by: [],
+    claim: {
+      agent: "e2e-agent",
+      run_id: "run-now-rich",
+      acquired_at: now - 300,
+      expires_at: now + 3_600,
+    },
+    updated_at: now - 30,
+  },
+  {
+    id: "glass-quiet",
+    title: "Claimed lane with no Glass posts",
+    status: "claimed",
+    priority: "p2",
+    repo: "glass",
+    blocked_by: [],
+    claim: {
+      agent: "quiet-agent",
+      run_id: "run-now-quiet",
+      acquired_at: now - 1_320,
+      expires_at: now + 3_600,
+    },
+    updated_at: now - 1_320,
+  },
   {
     id: "glass-905",
     title: "Application floor: add coverage and rendered e2e gates",
     status: "ready",
     priority: "p2",
     blocked_by: [],
-    updated_at: Math.floor(Date.now() / 1000),
+    updated_at: now,
   },
   {
     id: "glass-901",
@@ -17,7 +48,7 @@ const cards = [
     status: "done",
     priority: "p1",
     blocked_by: [],
-    updated_at: Math.floor(Date.now() / 1000) - 86_400,
+    updated_at: now - 86_400,
   },
 ];
 
@@ -79,8 +110,12 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/api/v1/cards") {
+    const status = url.searchParams.get("status");
+    const filtered = status
+      ? cards.filter((card) => card.status === status)
+      : cards;
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ cards }));
+    res.end(JSON.stringify({ cards: filtered }));
     return;
   }
   if (url.pathname === "/api/v1/runs/awaiting-input") {
