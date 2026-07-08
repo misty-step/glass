@@ -21,49 +21,61 @@ const cards = [
   },
 ];
 
-const now = Math.floor(Date.now() / 1000);
-const awaiting = [
-  {
-    card: {
-      id: "glass-931",
-      title: "Redesign 1/6 - the shell",
-      repo: "glass",
-      priority: "p1",
+function seedAwaiting() {
+  const now = Math.floor(Date.now() / 1000);
+  return [
+    {
+      card: {
+        id: "glass-931",
+        title: "Redesign 1/6 - the shell",
+        repo: "glass",
+        priority: "p1",
+      },
+      question: {
+        payload: "DECIDE: keep the rail active on viewer drill-downs?",
+        created_at: now - 120,
+      },
+      run: {
+        id: "run-shell",
+        agent: "glass-931-codex",
+        created_at: now - 240,
+      },
     },
-    question: {
-      payload: "DECIDE: keep the rail active on viewer drill-downs?",
-      created_at: now - 120,
+    {
+      card: {
+        id: "glass-933",
+        title: "Reports home",
+        repo: "glass",
+        priority: "p2",
+      },
+      question: {
+        payload: "ACT: confirm reports URL flip",
+        created_at: now - 600,
+      },
+      run: {
+        id: "run-reports",
+        agent: "glass-933-codex",
+        created_at: now - 900,
+      },
     },
-    run: {
-      id: "run-shell",
-      agent: "glass-931-codex",
-      created_at: now - 240,
-    },
-  },
-  {
-    card: {
-      id: "glass-933",
-      title: "Reports home",
-      repo: "glass",
-      priority: "p2",
-    },
-    question: {
-      payload: "ACT: confirm reports URL flip",
-      created_at: now - 600,
-    },
-    run: {
-      id: "run-reports",
-      agent: "glass-933-codex",
-      created_at: now - 900,
-    },
-  },
-];
+  ];
+}
+
+let awaiting = seedAwaiting();
+let answered = [];
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
     res.end("ok");
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/__reset") {
+    awaiting = seedAwaiting();
+    answered = [];
+    res.writeHead(204);
+    res.end();
     return;
   }
   if (url.pathname === "/api/v1/cards") {
@@ -73,7 +85,36 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === "/api/v1/runs/awaiting-input") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ awaiting }));
+    res.end(JSON.stringify({ awaiting, answered }));
+    return;
+  }
+  const answerMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/answer$/);
+  if (req.method === "POST" && answerMatch) {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const runId = answerMatch[1];
+      const index = awaiting.findIndex((item) => item.run.id === runId);
+      if (index === -1) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "run not awaiting input" }));
+        return;
+      }
+      let parsed = {};
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch (e) {}
+      const [item] = awaiting.splice(index, 1);
+      answered.push({
+        ...item,
+        answer: parsed.answer ?? "",
+        answered_at: Math.floor(Date.now() / 1000),
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, run: { ...item.run, state: "active" } }));
+    });
     return;
   }
   res.writeHead(404, { "content-type": "application/json" });
