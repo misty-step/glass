@@ -202,7 +202,7 @@ test("reports generator persists a last-week fleet activity digest", async ({
   await expect(page.getByText("GENERATE A REPORT")).toBeVisible();
   await expect(page.locator("#reports-range")).toContainText("->");
   await page.getByRole("button", { name: "Generate report" }).click();
-  await expect(page).toHaveURL(/\/reports\/R-001$/);
+  await expect(page).toHaveURL(/\/reports\/R-\d+$/);
   await expectSharedRail(page, "Reports");
   await expect(page.getByText("Activity digest - fleet").first()).toBeVisible();
   await expect(page.getByText("Native service MVP")).toBeVisible();
@@ -212,6 +212,62 @@ test("reports generator persists a last-week fleet activity digest", async ({
       .locator('[data-glance-component="table"]')
       .filter({ hasText: "Powder completions" }),
   ).toBeVisible();
+});
+
+test("operator can walk every rail place from Now", async ({ page }) => {
+  await setSystemMode(page);
+  await page.goto("/");
+  await expectSharedRail(page, "Now");
+
+  await page.getByRole("link", { name: "Needs you · 2" }).click();
+  await expect(page).toHaveURL(/\/needs-you$/);
+  await expectSharedRail(page, "Needs you · 2");
+
+  await page.goto("/");
+  await page.getByRole("link", { name: "Reports" }).click();
+  await expect(page).toHaveURL(/\/reports$/);
+  await expectSharedRail(page, "Reports");
+
+  await page.goto("/");
+  await page.getByRole("link", { name: "Clips" }).click();
+  await expect(page).toHaveURL(/\/clips$/);
+  await expectSharedRail(page, "Clips");
+
+  await page.goto("/");
+  await expectSharedRail(page, "Now");
+});
+
+test("fresh operator reaches a last-week digest from Now in two clicks", async ({
+  page,
+  request,
+}) => {
+  const seed = await request.post("/api/reports", {
+    data: {
+      kind: "activity-digest",
+      scope: { type: "fleet" },
+      window: "last-week",
+      requestedBy: "e2e-setup",
+    },
+  });
+  expect(seed.ok()).toBe(true);
+  const seeded = await seed.json();
+
+  await setSystemMode(page);
+  await page.goto("/");
+  await expectSharedRail(page, "Now");
+
+  await page.getByRole("link", { name: "Reports" }).click();
+  await expect(page).toHaveURL(/\/reports$/);
+  const digest = page.locator(".reports-library a", {
+    hasText: "Activity digest - fleet",
+  }).first();
+  await expect(digest).toHaveAttribute("href", seeded.url);
+
+  await digest.click();
+  await expect(page).toHaveURL(new RegExp(`${seeded.url}$`));
+  await expectSharedRail(page, "Reports");
+  await expect(page.getByText("Activity digest - fleet").first()).toBeVisible();
+  await expect(page.getByText("Powder completions")).toBeVisible();
 });
 
 test("shared shell rail renders on every human HTML route", async ({ page }) => {
