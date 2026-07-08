@@ -126,3 +126,45 @@ DATA.synthesis = {
     { agent: "canary-lane", line: "blocked 42m awaiting the ingest key" },
   ],
 };
+
+// Round 3: composable instrument material for the DOC reseed — all truthful.
+DATA.synthesis.hourly = [
+  { h: "06", n: 2 }, { h: "08", n: 3 }, { h: "10", n: 4 }, { h: "12", n: 5 },
+  { h: "14", n: 6 }, { h: "15", n: 9 }, { h: "16", n: 12 }, { h: "17", n: 14 },
+  { h: "18", n: 11 }, { h: "19", n: 4 },
+]; // posts + completions per hour, window 2026-07-08 UTC
+DATA.synthesis.diff = {
+  file: "src/shell.rs",
+  caption: "the smallest ship of the window — the wordmark goes caps (operator ruling)",
+  lines: [
+    ["ctx", "    <a class=\"ae-logo ae-logo-compact\" href=\"/\" aria-label=\"Glass\">"],
+    ["del", "      <span class=\"ae-name\">Glass</span>"],
+    ["add", "      <span class=\"ae-name\">GLASS</span>"],
+    ["ctx", "    </a>"],
+  ],
+};
+DATA.synthesis.terminal = {
+  caption: "sanctum deploy, 18:24 UTC",
+  lines: [
+    "> Running smoke checks on machine 2862134b65d578",
+    "> Checking health of machine 2862134b65d578",
+    "✔ Machine 2862134b65d578 is now in a good state",
+    "✔ Cleared lease for 2862134b65d578",
+  ],
+};
+DATA.synthesis.pipeline = {
+  caption: "the redesign's path through the window",
+  stages: [
+    { label: "spec", state: "done", note: "48-option lab" },
+    { label: "6 lanes", state: "done", note: "codex xhigh" },
+    { label: "gates", state: "done", note: "5× green" },
+    { label: "merge", state: "done", note: "PRs #15–19" },
+    { label: "vendor", state: "done", note: "sanctum #63" },
+    { label: "deploy", state: "done", note: "fly, healthy" },
+    { label: "live-fire", state: "blocked", note: "canary key" },
+  ],
+};
+DATA.synthesis.callouts = [
+  { kind: "ok", text: "Zero rollbacks; every merge gated on merged main." },
+  { kind: "warn", text: "canary-100 blocked 42m — the only human-gated item in the window." },
+];

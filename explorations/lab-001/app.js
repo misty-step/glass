@@ -11,12 +11,16 @@
     ["CLIP", "CLIPS — retired"],
     ["AGENT", "AGENT — scoped composition"],
   ];
-  const ROUND = { n: 2, winners: {
-    SHELL: "left rail direction — shadcn-grade",
-    NOW: "NOW-5 direction — single column",
-    WIRE: "WIRE-6 direction — tape + pinned severity",
-    NEED: "NEED-1 LOCKED",
-  } };
+  const SECTION_ROUND = {
+    SHELL: "round 2 · WINNER: SHELL-7 (9 runner-up; rail figures too noisy)",
+    NOW: "round 2 · WINNER: NOW-9 (terser state copy in converge)",
+    WIRE: "round 2 · WINNER: WIRE-10",
+    REP: "round 2 · WINNER: REP-8",
+    DOC: "round 3 · reseeded — composed generative-UI, not a text document",
+    NEED: "LOCKED · NEED-1",
+    CLIP: "closed",
+    AGENT: "round 2 · awaiting verdict",
+  };
   // round-1 kills (IDs never reused; builders remain reachable by direct hash)
   const KILLED = new Set([
     "SHELL-2","SHELL-3","SHELL-4","SHELL-5","SHELL-6",
@@ -27,6 +31,12 @@
     "NEED-2","NEED-3","NEED-4","NEED-5","NEED-6",
     "CLIP-1","CLIP-2","CLIP-3","CLIP-4","CLIP-5","CLIP-6",
     "AGENT-1","AGENT-2","AGENT-3","AGENT-4","AGENT-5",
+    // round-2 kills
+    "SHELL-1","SHELL-8","SHELL-10",
+    "NOW-1","NOW-5","NOW-6","NOW-7","NOW-8","NOW-10","NOW-11",
+    "WIRE-1","WIRE-6","WIRE-7","WIRE-8","WIRE-9",
+    "REP-7","REP-9","REP-10","REP-11","REP-12",
+    "DOC-7","DOC-8","DOC-9","DOC-10","DOC-11","DOC-12",
   ]);
   const CLOSED_NOTES = {
     CLIP: "closed — clips fold into the wire as an event kind (glass-942)",
@@ -47,8 +57,7 @@
   SECTION_ORDER.forEach(([prefix, label]) => {
     const secIds = byPrefix(prefix);
     const h = document.createElement("h2");
-    const win = ROUND.winners[prefix];
-    h.innerHTML = `${label} <span class="round">· round ${ROUND.n}${win ? " · " + win : ""}</span>`;
+    h.innerHTML = `${label} <span class="round">· ${SECTION_ROUND[prefix] || "round 2"}</span>`;
     registry.appendChild(h);
     if (CLOSED_NOTES[prefix]) {
       const note = document.createElement("div");
@@ -77,7 +86,7 @@
     if (!window.SPECS[id]) return;
     localStorage.setItem("lab001.opt", id);
     if (push) history.replaceState(null, "", "#" + id);
-    frame.src = "frame.html?v=2#" + id;
+    frame.src = "frame.html?v=3#" + id;
     optlabel.textContent = id + " — " + (window.SPECS[id].label || "") + (window.SPECS[id].thesis ? " · " + window.SPECS[id].thesis : "");
     registry.querySelectorAll("a").forEach((a) => a.classList.toggle("on", a.dataset.id === id));
     const on = registry.querySelector("a.on");

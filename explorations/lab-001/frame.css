@@ -346,3 +346,189 @@ html, body { height: 100%; }
 .r2s-sheet-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 1em; margin-bottom: 0.4em; border-bottom: 1px solid var(--ae-line); }
 .r2s-sheet-close { background: transparent; border: 0; color: var(--ae-ink-muted); cursor: pointer; padding: 0.2em; display: inline-flex; }
 .r2s-sheet-close:hover { color: var(--ae-ink); }
+
+/* ── R3 report-doc component library (r3b-): token-pure, structural only ──
+   Shared generative-UI instruments (mono code/diff/terminal, a CSS
+   pipeline, a bar chart, a banner spark) plus three doc scaffolds. Status
+   rides the glyph/gutter; nothing is a filled pill; radius 0; hairlines. */
+
+/* the shared exhibit frame — a figure that breathes inside a doc */
+.r3b-exhibit { margin: 1.6em 0; }
+.r3b-scroll { overflow-x: auto; }
+
+/* mono blocks: code / diff / terminal — one wash slab, hairline-free body */
+.r3b-code { background: var(--ae-wash); font-family: var(--ae-font-mono); font-size: 13px; line-height: 1.7; padding: 1em 1.2em; overflow-x: auto; color: var(--ae-ink); }
+.r3b-code .r3b-cap { display: block; margin-bottom: 0.7em; color: var(--ae-ink-faint); letter-spacing: 0.08em; }
+.r3b-line { display: grid; grid-template-columns: 1.3em 1fr; gap: 0.7em; white-space: pre; }
+.r3b-gut { color: var(--ae-ink-faint); user-select: none; text-align: center; }
+.r3b-gut.r3b-add { color: var(--ae-ok); }
+.r3b-gut.r3b-del { color: var(--ae-err); }
+.r3b-tline { display: flex; gap: 0.6em; white-space: pre-wrap; }
+.r3b-mark { flex: none; user-select: none; }
+.r3b-mark.r3b-ok { color: var(--ae-ok); }
+.r3b-mark.r3b-prompt { color: var(--ae-ink-faint); }
+
+/* the banner spark: a wide pen-stroke trend (the inline .ae-spark, stretched) */
+.r3b-spark-lg { width: 100%; height: 3em; }
+.r3b-trendrow { display: flex; align-items: baseline; justify-content: space-between; gap: var(--ae-space-4); margin-bottom: 0.5em; }
+
+/* the bar chart: bars dressed on the kit's .ae-plot chrome */
+.r3b-plotwrap { max-width: 34em; }
+.r3b-bar { fill: var(--ae-ink-muted); }
+.r3b-bar.is-peak { fill: var(--ae-accent); }
+
+/* the pipeline: hairline-framed stages joined edge to edge; status on the
+   glyph. Horizontal on the desk, a vertical run on the phone. */
+.r3b-pipe { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--ae-line); }
+.r3b-stage { display: flex; flex-direction: column; gap: 0.35em; min-width: 0; padding: 0.7em 0.85em; border-left: 1px solid var(--ae-line); }
+.r3b-stage:first-child { border-left: 0; }
+.r3b-stage-head { display: flex; align-items: center; gap: 0.4em; }
+.r3b-stage-head .ae-icon { flex: none; align-self: center; width: 1em; height: 1em; }
+.r3b-stage-glyph { color: var(--ae-ink-muted); display: inline-flex; }
+.r3b-stage-label { font-weight: var(--ae-w-medium); min-width: 0; }
+.r3b-stage.is-blocked .r3b-stage-label { color: var(--ae-ink); }
+.r3b-stage-note { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ae-ink-faint); }
+@media (max-width: 48rem) {
+  .r3b-pipe { grid-auto-flow: row; }
+  .r3b-stage { flex-direction: row; align-items: baseline; gap: 0.6em; border-left: 0; border-top: 1px solid var(--ae-line); }
+  .r3b-stage:first-child { border-top: 0; }
+  .r3b-stage-note { margin-left: auto; }
+}
+
+/* badge / label rows */
+.r3b-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; }
+.r3b-callouts { display: grid; gap: var(--ae-space-3); margin: 1.4em 0; }
+.r3b-callouts .ae-status { align-items: baseline; }
+
+/* callout-status glyphs must sit centred on their line */
+.r3b-callouts .ae-status .ae-icon { align-self: center; }
+
+/* ── DOC-16 story scroll: an act rail of mono numerals + a hairline spine ── */
+.r3b-acts { display: grid; grid-template-columns: 3.4em minmax(0, 1fr); column-gap: var(--ae-space-6); row-gap: 0; margin-top: var(--ae-space-6); }
+.r3b-actnum { position: relative; text-align: right; padding-top: 0.1em; }
+.r3b-actnum-v { font-family: var(--ae-font-mono); font-variant-numeric: tabular-nums; font-weight: var(--ae-w-black); font-size: 13px; letter-spacing: 0.1em; color: var(--ae-ink); }
+.r3b-actnum-k { display: block; font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.14em; color: var(--ae-ink-faint); margin-top: 0.2em; }
+.r3b-actnum.is-here .r3b-actnum-v { color: var(--ae-accent); }
+.r3b-actmark { position: absolute; top: 0.35em; right: -1.05em; width: 0.45em; height: 0.45em; background: var(--ae-accent); }
+.r3b-actbody { border-left: 1px solid var(--ae-line); padding-left: var(--ae-space-6); padding-bottom: var(--ae-space-8); min-width: 0; }
+.r3b-acts > .r3b-actbody:last-child { padding-bottom: 0; }
+@media (max-width: 40rem) {
+  .r3b-acts { grid-template-columns: 1fr; }
+  .r3b-actnum { text-align: left; padding-top: 0; margin-bottom: 0.4em; }
+  .r3b-actnum-k { display: inline; margin-left: 0.6em; }
+  .r3b-actmark { display: none; }
+  .r3b-actbody { border-left: 0; padding-left: 0; padding-bottom: var(--ae-space-7); }
+}
+
+/* ── DOC-17 dashboard fold ─────────────────────────────────────────────── */
+.r3b-dash { display: grid; gap: var(--ae-space-5); }
+.r3b-dash-2col { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: var(--ae-space-6); align-items: start; }
+.r3b-panel-h { display: flex; align-items: baseline; justify-content: space-between; gap: var(--ae-space-4); margin-bottom: 0.6em; }
+.r3b-fold-hr { display: flex; align-items: center; gap: var(--ae-space-4); border: 0; margin: var(--ae-space-6) 0 var(--ae-space-5); }
+.r3b-fold-hr::before, .r3b-fold-hr::after { content: ""; flex: 1; border-top: 1px solid var(--ae-line); }
+.r3b-fold-cap { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.14em; color: var(--ae-ink-faint); white-space: nowrap; }
+.r3b-fold-metric { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); white-space: nowrap; }
+@media (max-width: 48rem) { .r3b-dash-2col { grid-template-columns: 1fr; } }
+
+/* ── DOC-18 annotated ledger: a mono tape broken by full-width synthesis ── */
+.r3b-ledger { margin-top: var(--ae-space-6); }
+.r3b-legend { display: flex; flex-wrap: wrap; gap: var(--ae-space-2) var(--ae-space-4); padding-bottom: var(--ae-space-4); margin-bottom: var(--ae-space-4); border-bottom: 1px solid var(--ae-line); }
+.r3b-leg { display: inline-flex; align-items: center; gap: 0.4em; font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--ae-ink-muted); }
+.r3b-leg .ae-icon { width: 0.95em; height: 0.95em; align-self: center; }
+.r3b-tape { border-top: 1px solid var(--ae-line); }
+.r3b-tape-row { display: grid; grid-template-columns: 4.4em 1.2em minmax(0, 1fr); align-items: baseline; gap: var(--ae-space-3); padding: 0.5em 0; border-bottom: 1px solid var(--ae-line); color: inherit; text-decoration: none; }
+.r3b-tape-time { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ae-ink-faint); }
+.r3b-tape-glyph { display: inline-flex; align-self: center; color: var(--ae-ink-muted); }
+.r3b-tape-glyph .ae-icon { width: 0.95em; height: 0.95em; align-self: center; }
+.r3b-tape-body { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5em; }
+.r3b-tape-agent { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ae-ink-muted); }
+.r3b-tape-text { font-size: 13px; color: var(--ae-ink); }
+.r3b-annot { margin: 0.2em 0; padding: var(--ae-space-5) 0 var(--ae-space-5) var(--ae-space-5); border-left: 2px solid var(--ae-accent); }
+.r3b-annot-k { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.14em; color: var(--ae-ink-faint); }
+.r3b-annot-k b { color: var(--ae-ink); font-weight: var(--ae-w-medium); }
+.r3b-annot h3 { margin: 0.3em 0 0.5em; font-weight: var(--ae-w-black); }
+.r3b-annot p { margin: 0.5em 0 0; }
+.r3b-annot .r3b-badges { margin-top: 0.6em; }
+
+/* ── R3 report-doc lane A (r3a-): token-pure, structural only ──────────
+   Three compositions over one instrument set — the proof-loop brief, the
+   magazine spread, the console readout. Status rides the glyph/gutter;
+   radius 0; hairlines; nothing is a filled pill. The mono code/diff/
+   terminal chrome is the shared r3b- set, reused read-only. */
+
+/* shared: the by-repo meter stack (label · ruled meter · figure) */
+.r3a-repo { display: grid; gap: var(--ae-space-3); }
+.r3a-repo-row { display: grid; grid-template-columns: minmax(4.5em, 7em) 1fr auto; align-items: center; gap: var(--ae-space-4); }
+.r3a-repo-n { min-width: 1.6em; text-align: right; }
+
+/* shared: the hourly bar readout — upright columns, the peak in accent */
+.r3a-bars { display: flex; align-items: flex-end; gap: var(--ae-space-2); height: 7.5em; }
+.r3a-bar-col { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 0.4em; min-width: 0; height: 100%; }
+.r3a-bar-track { flex: 1 1 auto; width: 100%; display: flex; align-items: flex-end; }
+.r3a-bar-fill { width: 100%; background: var(--ae-ink-muted); }
+.r3a-bar-fill.is-peak { background: var(--ae-accent); }
+.r3a-bar-h { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ae-ink-faint); }
+
+/* shared: icon-forward callout / ask lines, centred glyphs */
+.r3a-calls { display: grid; gap: var(--ae-space-3); }
+.r3a-calls .ae-status { align-items: baseline; }
+.r3a-calls .ae-status .ae-icon { align-self: center; }
+
+/* shared: the .ae-flow spine keeps a legible min-width and scrolls on phone */
+.r3a-flowwrap { overflow-x: auto; }
+.r3a-flowwrap .ae-flow { min-width: 26em; }
+
+/* shared: a compact evidence tape (time · kind chip · text) */
+.r3a-tape { border-top: 1px solid var(--ae-line); }
+.r3a-tape-row { display: grid; grid-template-columns: 4.4em max-content minmax(0, 1fr); align-items: baseline; gap: var(--ae-space-3); padding: 0.5em 0; border-bottom: 1px solid var(--ae-line); color: inherit; text-decoration: none; }
+.r3a-tape-t { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ae-ink-faint); }
+.r3a-tape-kind { align-self: center; }
+.r3a-tape-text { font-size: 13px; color: var(--ae-ink); min-width: 0; }
+
+/* shared: ratified-decision rows as ticked icon-rows */
+.r3a-decisions { display: grid; gap: var(--ae-space-3); }
+.r3a-decisions .ae-icon-row .ae-list-icon { align-self: center; color: var(--ae-ink-muted); }
+
+/* ── DOC-13 the instrument brief: hero band + strict claim↔proof pairs ── */
+.r3a-hero { padding-bottom: var(--ae-space-5); border-bottom: 1px solid var(--ae-line); }
+.r3a-hero h1 { margin-bottom: var(--ae-space-4); }
+.r3a-hero .ae-stat-badges { margin-top: var(--ae-space-4); }
+.r3a-hero-trend { display: flex; align-items: baseline; gap: var(--ae-space-4); margin-top: var(--ae-space-5); }
+.r3a-hero-trend .ae-h { margin-bottom: 0; }
+.r3a-spark-hero { flex: 1 1 auto; height: 1.8em; color: var(--ae-accent); }
+.r3a-proof { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: var(--ae-space-6) var(--ae-space-7); align-items: start; margin-top: var(--ae-space-6); padding-top: var(--ae-space-6); border-top: 1px solid var(--ae-line); }
+.r3a-proof-claim p:last-child { margin-bottom: 0; }
+.r3a-proof-ex { margin: 0; }
+.r3a-proof-ex > figcaption { margin-top: 0; }
+.r3a-close { margin-top: var(--ae-space-7); padding-top: var(--ae-space-6); border-top: 1px solid var(--ae-line); }
+@media (max-width: 52rem) {
+  .r3a-proof { grid-template-columns: 1fr; gap: var(--ae-space-4); }
+  .r3a-hero-trend { flex-wrap: wrap; }
+  .r3a-spark-hero { flex-basis: 100%; order: 3; }
+}
+
+/* ── DOC-14 the magazine spread: full-measure open, asymmetric rows ───── */
+.r3a-mag-open { max-width: 42em; }
+.r3a-spread-row { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: var(--ae-space-7); align-items: start; margin-top: var(--ae-space-7); padding-top: var(--ae-space-6); border-top: 1px solid var(--ae-line); }
+.r3a-spread-body > p:last-child { margin-bottom: 0; }
+.r3a-spread-body .ae-h { margin-top: 0; }
+.r3a-spread-side { margin: 0; }
+.r3a-spread-side > figcaption { margin-top: 0.2em; }
+.r3a-hl { display: grid; gap: var(--ae-space-3); margin-bottom: var(--ae-space-4); }
+.r3a-hl-row { display: grid; gap: 0.25em; }
+.r3a-hl-line { font-size: 13px; color: var(--ae-ink-muted); line-height: 1.5; }
+@media (max-width: 52rem) {
+  .r3a-spread-row { grid-template-columns: 1fr; gap: var(--ae-space-5); }
+}
+
+/* ── DOC-15 the console readout: standfirst line + a grid of readout cells ─ */
+.r3a-console-head { padding-bottom: var(--ae-space-5); border-bottom: 1px solid var(--ae-line); }
+.r3a-console-line { max-width: 46em; margin: var(--ae-space-4) 0; }
+.r3a-console-head .ae-stat-badges { margin-top: var(--ae-space-4); }
+.r3a-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ae-space-6) var(--ae-space-7); margin-top: var(--ae-space-6); }
+.r3a-cell { margin: 0; min-width: 0; }
+.r3a-cell > figcaption { margin-top: 0; }
+.r3a-cell-wide { grid-column: 1 / -1; }
+@media (max-width: 52rem) {
+  .r3a-grid { grid-template-columns: 1fr; }
+}
