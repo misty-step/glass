@@ -18,15 +18,15 @@ async function expectSharedRail(page, activeName: string | null) {
   const needsYouName = activeName?.startsWith("Needs you")
     ? activeName
     : "Needs you · 2";
-  const shell = page.locator(".ae-shell");
-  const rail = page.locator(".ae-rail");
-  const desk = page.locator(".ae-desk");
+  const shell = page.locator(".glass-shell");
+  const rail = page.locator(".glass-rail");
+  const desk = page.locator(".glass-desk");
   await expect(shell).toHaveCount(1);
   await expect(rail).toHaveCount(1);
   await expect(desk).toHaveCount(1);
 
   await expect(rail.locator(".ae-logo")).toContainText("GLASS");
-  await expect(rail.locator(".ae-h")).toHaveText("PLACES");
+  await expect(rail.locator(".ae-h", { hasText: "PLACES" })).toHaveCount(1);
   await expect(rail.getByRole("link", { name: "Now" })).toHaveAttribute(
     "href",
     "/",
@@ -39,10 +39,7 @@ async function expectSharedRail(page, activeName: string | null) {
     "href",
     "/reports",
   );
-  await expect(rail.getByRole("link", { name: "Clips" })).toHaveAttribute(
-    "href",
-    "/clips",
-  );
+  await expect(rail.getByRole("link", { name: "Clips" })).toHaveCount(0);
   await expect(rail.locator("[data-sanctum-home]")).toContainText("Sanctum");
   await expect(
     rail.getByRole("link", { name: "Wire an agent" }),
@@ -51,7 +48,7 @@ async function expectSharedRail(page, activeName: string | null) {
   const active = rail.locator('[aria-current="page"]');
   if (activeName) {
     await expect(active).toHaveCount(1);
-    await expect(active).toHaveText(activeName);
+    await expect(active).toContainText(activeName);
   } else {
     await expect(active).toHaveCount(0);
   }
@@ -74,26 +71,26 @@ test("viewer renders seeded posts, theme modes, and sandboxed iframe", async ({
   await page.goto("/");
 
   await expect(page.locator(".ae-stat-badges")).toBeVisible();
-  await expect(page.locator(".ae-stat-badge", { hasText: "agents live" })).toContainText("2");
+  await expect(page.locator(".ae-stat-badge", { hasText: "working" })).toContainText("2");
   await expect(page.locator(".ae-stat-badge", { hasText: "need you" })).toContainText("2");
 
-  const richCard = page.locator(".ae-wall-card", { hasText: "e2e-agent" });
+  const richCard = page.locator(".glass-now-row", { hasText: "e2e-agent" });
   await expect(richCard).toHaveCount(1);
   await expect(richCard).toContainText("powder glass-932");
   await expect(richCard).toContainText("Rendered e2e seed");
 
-  const quietCard = page.locator(".ae-wall-card.mk-quiet-card", {
+  const quietCard = page.locator(".glass-now-row.is-quiet", {
     hasText: "quiet-agent",
   });
   await expect(quietCard).toHaveCount(1);
   await expect(quietCard).toContainText("powder glass-quiet");
-  await expect(quietCard).toContainText("no posts yet");
+  await expect(quietCard).toContainText("quiet ·");
 
-  const seedRow = page.locator(".ae-list-row", {
+  const seedRow = page.locator(".glass-wire-tape-row", {
     hasText: "Rendered e2e seed",
   });
   await expect(seedRow).toHaveCount(1);
-  await expect(seedRow.locator(".ae-chip")).toHaveText("report");
+  await expect(seedRow.locator(".glass-wire-kind")).toHaveAttribute("title", "report");
   await expect(seedRow).toContainText("e2e-agent");
 
   await seedRow.click();
@@ -179,17 +176,192 @@ test("now teaches the empty fleet and empty wire states", async ({ page }) => {
   });
 
   await page.goto("/");
-  await expect(page.locator(".glass-wall-empty")).toContainText(
+  await expect(page.locator(".glass-now-empty")).toContainText(
     "Nothing on stage. Agents appear here when they claim a Powder card or publish",
   );
   await expect(
-    page.locator(".glass-wall-empty").getByRole("link", {
+    page.locator(".glass-now-empty").getByRole("link", {
       name: "Wire an agent",
     }),
   ).toHaveAttribute("href", "/setup");
   await expect(page.locator(".glass-wire-empty")).toContainText(
     "No ambient evidence yet. Landmark: unconfigured",
   );
+});
+
+test("now renders the locked NOW-9 column and WIRE-10 tape", async ({
+  page,
+}) => {
+  await setSystemMode(page);
+  const now = Math.floor(Date.now() / 1000);
+  await page.route("**/api/now", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        stats: {
+          agentsLive: 3,
+          needYouCount: 1,
+          postsToday: 4,
+          sessionsToday: 3,
+          secondsSinceLastEvent: 12,
+        },
+        wall: [
+          {
+            agent: "alpha-live",
+            href: "/agent/alpha-live",
+            status: "ok",
+            powderTag: "powder glass-live",
+            powderCardId: "glass-live",
+            powderTitle: "Live work",
+            meta: "report: shaping the viewer",
+            sessionId: "ses-live",
+            sessionTitle: "live lane",
+            postId: "post-live",
+            latestKind: "report",
+            latestAt: now - 20,
+            ageSeconds: 20,
+            claimedAt: now - 900,
+            quiet: false,
+            trace: [],
+          },
+          {
+            agent: "m-quiet",
+            href: "/agent/m-quiet",
+            status: "quiet",
+            powderTag: "powder glass-quiet",
+            powderCardId: "glass-quiet",
+            powderTitle: "Quiet work",
+            meta: "claimed 1d ago · no posts yet",
+            sessionId: null,
+            sessionTitle: null,
+            postId: null,
+            latestKind: null,
+            latestAt: null,
+            ageSeconds: 86_400,
+            claimedAt: now - 86_400,
+            quiet: true,
+            trace: [],
+          },
+          {
+            agent: "z-blocked",
+            href: "/agent/z-blocked",
+            status: "warn",
+            powderTag: "powder glass-blocked",
+            powderCardId: "glass-blocked",
+            powderTitle: "Blocked work",
+            meta: "blocked: waiting for ingest key",
+            sessionId: "ses-blocked",
+            sessionTitle: "blocked lane",
+            postId: "post-blocked",
+            latestKind: "blocked",
+            latestAt: now - 2_520,
+            ageSeconds: 2_520,
+            claimedAt: now - 3_000,
+            quiet: false,
+            trace: [],
+          },
+        ],
+        wire: [
+          {
+            id: "wire-blocked",
+            kind: "blocked",
+            source: "glass",
+            title: "Canary key blocks deploy",
+            summary: "Needs a key",
+            occurredAt: now - 40,
+            agent: "z-blocked",
+            sessionId: "ses-blocked",
+            sessionTitle: "blocked lane",
+            postId: "post-blocked",
+            evidenceLinks: [],
+            detailLines: ["blocks deploy"],
+          },
+          {
+            id: "wire-question",
+            kind: "question",
+            source: "glass",
+            title: "Choose report window",
+            summary: "Needs a decision",
+            occurredAt: now - 55,
+            agent: "planner",
+            sessionId: null,
+            sessionTitle: null,
+            postId: null,
+            evidenceLinks: [],
+            detailLines: [],
+          },
+          {
+            id: "wire-report",
+            kind: "report",
+            source: "glass",
+            title: "Report generated",
+            summary: "Digest ready",
+            occurredAt: now - 70,
+            agent: "alpha-live",
+            sessionId: "ses-live",
+            sessionTitle: "live lane",
+            postId: "post-live",
+            evidenceLinks: [],
+            detailLines: ["report detail"],
+          },
+          {
+            id: "wire-shipped",
+            kind: "shipped",
+            source: "glass",
+            title: "Patch shipped",
+            summary: "Merged locally",
+            occurredAt: now - 120,
+            agent: "shipper",
+            sessionId: null,
+            sessionTitle: null,
+            postId: null,
+            evidenceLinks: [],
+            detailLines: [],
+          },
+        ],
+        dead: { agentCount: 0, sessionCount: 0, sessions: [] },
+        notices: [],
+        landmark: { status: "ok", message: null },
+      }),
+    });
+  });
+
+  await page.goto("/");
+
+  const rows = page.locator(".glass-now-row");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toContainText("z-blocked");
+  await expect(rows.nth(0)).toContainText("blocked 42m — waiting for ingest key");
+  await expect(rows.nth(1)).toContainText("alpha-live");
+  await expect(rows.nth(1)).toContainText("live · shaping the viewer");
+  await expect(rows.nth(2)).toContainText("m-quiet");
+  await expect(rows.nth(2)).toContainText("quiet · 1d");
+
+  await page.getByRole("button", { name: "Name" }).click();
+  await expect(rows.nth(0)).toContainText("alpha-live");
+  await expect(rows.nth(1)).toContainText("m-quiet");
+  await expect(rows.nth(2)).toContainText("z-blocked");
+
+  await expect(page.locator(".glass-wire-legend")).toContainText("blocked");
+  await expect(page.locator(".glass-wire-pinned")).toContainText(
+    "NEEDS ATTENTION · 2",
+  );
+  await expect(page.locator(".glass-wire-pinned")).toContainText(
+    "Canary key blocks deploy",
+  );
+  await expect(page.locator(".glass-wire-pinned")).toContainText(
+    "Choose report window",
+  );
+  await expect(page.locator(".glass-wire-tape-row")).toHaveCount(2);
+  await expect(page.locator(".glass-wire-tape-row").first()).toContainText(
+    "Report generated",
+  );
+
+  await page.locator(".glass-wire-tape-row", { hasText: "Report generated" }).click();
+  await expect(page.locator("#feed-dialog")).toBeVisible();
+  await expect(page.locator("#feed-dialog")).toContainText("Report generated");
+  await page.locator("[data-feed-close]").click();
 });
 
 test("reports generator persists a last-week fleet activity digest", async ({
@@ -229,11 +401,24 @@ test("operator can walk every rail place from Now", async ({ page }) => {
   await expectSharedRail(page, "Reports");
 
   await page.goto("/");
-  await page.getByRole("link", { name: "Clips" }).click();
-  await expect(page).toHaveURL(/\/clips$/);
-  await expectSharedRail(page, "Clips");
+  await expectSharedRail(page, "Now");
+});
 
-  await page.goto("/");
+test("clips human route redirects to Now while the API stays available", async ({
+  page,
+  request,
+}) => {
+  const redirect = await request.get("/clips", { maxRedirects: 0 });
+  expect(redirect.status()).toBe(301);
+  expect(redirect.headers()["location"]).toBe("/");
+
+  const api = await request.get("/api/clips?limit=10");
+  expect(api.ok()).toBe(true);
+  const body = await api.json();
+  expect(Array.isArray(body.clips)).toBe(true);
+
+  await page.goto("/clips");
+  await expect(page).toHaveURL(/\/$/);
   await expectSharedRail(page, "Now");
 });
 
@@ -277,7 +462,6 @@ test("shared shell rail renders on every human HTML route", async ({ page }) => 
     ["/", "Now"],
     ["/agent/e2e-agent", "Now"],
     ["/reports", "Reports"],
-    ["/clips", "Clips"],
     ["/needs-you", "Needs you · 2"],
     ["/review/sample", null],
   ];
@@ -289,7 +473,7 @@ test("shared shell rail renders on every human HTML route", async ({ page }) => 
 
   await page.goto("/");
   const detailHref = await page
-    .locator(".ae-list-row", { hasText: "Rendered e2e seed" })
+    .locator(".glass-wire-tape-row", { hasText: "Rendered e2e seed" })
     .getAttribute("href");
   expect(detailHref).toBeTruthy();
   await page.goto(detailHref!);
@@ -328,31 +512,50 @@ test("needs-you renders mock Powder asks and relays an answer", async ({
   await expect(page.locator("details.ae-fold")).toContainText("ANSWERED");
 });
 
-test("clips renders in the shared shell with honest empty capture guidance", async ({
-  page,
-}) => {
-  await setSystemMode(page);
-  await page.goto("/clips");
-  await expectSharedRail(page, "Clips");
-  await expect(page.getByText("Clip review queue")).toBeVisible();
-  await expect(page.getByText("No clips captured yet")).toBeVisible();
-  await expect(page.getByText("MCP capture_clip")).toBeVisible();
-  await expect(page.getByText("POST /api/clips")).toBeVisible();
-});
-
-test("shared rail becomes bottom chrome at 390px", async ({ page }) => {
+test("shared rail becomes a burger sheet at 390px", async ({ page }) => {
   await setSystemMode(page);
   await page.setViewportSize({ width: 390, height: 760 });
   await page.goto("/needs-you");
 
-  await expectSharedRail(page, "Needs you · 2");
-  const railBox = await page.locator(".ae-rail").boundingBox();
-  const deskBox = await page.locator(".ae-desk").boundingBox();
-  expect(railBox).toBeTruthy();
-  expect(deskBox).toBeTruthy();
-  expect(railBox!.y).toBeGreaterThan(deskBox!.y);
-  expect(Math.round(railBox!.width)).toBe(390);
-  expect(railBox!.height).toBeLessThan(90);
+  await expect(page.locator(".glass-topbar")).toBeVisible();
+  await expect(page.locator(".glass-topbar .ae-logo")).toContainText("GLASS");
+  await expect(page.locator(".glass-top-needs")).toContainText("2");
+  await expect(page.locator(".glass-shell")).toHaveAttribute(
+    "data-nav-open",
+    "false",
+  );
+
+  const closedRailBox = await page.locator(".glass-rail").boundingBox();
+  expect(closedRailBox).toBeTruthy();
+  expect(closedRailBox!.x).toBeLessThan(0);
+
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await expect(page.locator(".glass-shell")).toHaveAttribute(
+    "data-nav-open",
+    "true",
+  );
+  await expect
+    .poll(async () => {
+      const box = await page.locator(".glass-rail").boundingBox();
+      return box ? Math.round(box.x) : -999;
+    })
+    .toBe(0);
+  const openRailBox = await page.locator(".glass-rail").boundingBox();
+  expect(openRailBox!.height).toBeGreaterThan(700);
+  await expect(page.locator(".glass-rail")).toContainText("PLACES");
+  await expect(page.locator(".glass-rail")).toContainText("Needs you");
+
+  await page.locator(".glass-nav-scrim").click({ position: { x: 360, y: 40 } });
+  await expect(page.locator(".glass-shell")).toHaveAttribute(
+    "data-nav-open",
+    "false",
+  );
+  await expect
+    .poll(async () => {
+      const box = await page.locator(".glass-rail").boundingBox();
+      return box ? Math.round(box.x) : 0;
+    })
+    .toBeLessThan(0);
 
   const scroll = await page.evaluate(() => ({
     body: document.body.scrollWidth,

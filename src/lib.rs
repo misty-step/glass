@@ -14,12 +14,6 @@ use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
-use glance_catalog::leaf::Metric;
-use glance_catalog::structural::{Cell, CellValue, ColumnSpec, Hero, Row, Table};
-use glance_catalog::{
-    Component, InlineNode, REPORT, RenderContext, render_component, validate_layout,
-};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1354,10 +1348,6 @@ fn draft_clip_caption(
     parts.join(" - ")
 }
 
-fn text(s: impl Into<String>) -> Vec<InlineNode> {
-    vec![InlineNode::Text { text: s.into() }]
-}
-
 fn fresh_id(prefix: &str) -> String {
     let count = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{}-{count}", now_millis())
@@ -1385,7 +1375,7 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/session/{session_id}", get(viewer))
         .route("/session/{session_id}/p/{post_id}", get(viewer))
         .route("/agent/{agent}", get(viewer))
-        .route("/clips", get(clips_page))
+        .route("/clips", get(clips_redirect))
         .route("/reports", get(reports::reports_shell))
         .route("/reports/{id}", get(reports::report_doc_shell))
         .route("/setup", get(setup))
@@ -1555,18 +1545,8 @@ async fn list_clips(
     ))
 }
 
-async fn clips_page(State(glass): State<Glass>) -> Result<Html<String>, ApiError> {
-    let clips = glass.list_clip_queue(50)?;
-    let body = render_clip_queue_body(&clips)?;
-    Ok(Html(shell::render_shell(shell::Shell {
-        title: "Glass - Clips",
-        active: Some(shell::Place::Clips),
-        needs_you_count: needs_you::awaiting_input_count().await,
-        sanctum_url: &sanctum_url(),
-        styles: "",
-        body: &body,
-        scripts: "",
-    })))
+async fn clips_redirect() -> impl IntoResponse {
+    (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, "/")])
 }
 
 #[derive(Debug, Deserialize)]
@@ -2293,124 +2273,6 @@ fn powder_claim_from_card(value: &Value) -> Option<PowderClaim> {
         acquired_at,
         updated_at,
     })
-}
-
-fn render_clip_queue_body(clips: &[ClipQueueItem]) -> Result<String> {
-    let hero = Component::Hero(Hero {
-        title: "Clip review queue".to_string(),
-        summary: text("Marked live-stage moments, packaged with post context and draft captions."),
-        stats: vec![Metric {
-            label: "Queued clips".to_string(),
-            value: clips.len().to_string(),
-        }],
-        image_intent: None,
-    });
-    let columns = vec![
-        ColumnSpec {
-            key: "created".to_string(),
-            label: "Created".to_string(),
-            numeric: true,
-            emphasize: false,
-        },
-        ColumnSpec {
-            key: "caption".to_string(),
-            label: "Draft caption".to_string(),
-            numeric: false,
-            emphasize: true,
-        },
-        ColumnSpec {
-            key: "surface".to_string(),
-            label: "Surface".to_string(),
-            numeric: false,
-            emphasize: false,
-        },
-        ColumnSpec {
-            key: "evidence".to_string(),
-            label: "Evidence".to_string(),
-            numeric: false,
-            emphasize: false,
-        },
-        ColumnSpec {
-            key: "note".to_string(),
-            label: "Note".to_string(),
-            numeric: false,
-            emphasize: false,
-        },
-    ];
-    let rows = clips
-        .iter()
-        .map(|item| {
-            let surface_label = item
-                .context
-                .surface
-                .as_ref()
-                .map(|surface| format!("{} / {}", surface.kind, surface.id))
-                .unwrap_or_else(|| "whole post".to_string());
-            let evidence = item
-                .context
-                .evidence_links
-                .first()
-                .cloned()
-                .unwrap_or_else(|| ClipEvidenceLink {
-                    label: "post".to_string(),
-                    url: format!("/session/{}/p/{}", item.clip.session_id, item.clip.post_id),
-                });
-            Row {
-                cells: vec![
-                    Cell {
-                        column_key: "created".to_string(),
-                        value: CellValue::Text {
-                            text: item.clip.created_at.to_string(),
-                        },
-                    },
-                    Cell {
-                        column_key: "caption".to_string(),
-                        value: CellValue::Text {
-                            text: item.draft_caption.clone(),
-                        },
-                    },
-                    Cell {
-                        column_key: "surface".to_string(),
-                        value: CellValue::Text {
-                            text: surface_label,
-                        },
-                    },
-                    Cell {
-                        column_key: "evidence".to_string(),
-                        value: CellValue::Link {
-                            text: evidence.label,
-                            href: evidence.url,
-                        },
-                    },
-                    Cell {
-                        column_key: "note".to_string(),
-                        value: CellValue::Text {
-                            text: item.clip.note.clone().unwrap_or_else(|| "-".to_string()),
-                        },
-                    },
-                ],
-            }
-        })
-        .collect::<Vec<_>>();
-    let table = Component::Table(Table {
-        heading: "Review candidates".to_string(),
-        columns,
-        rows,
-        empty_note: (clips.is_empty()).then(|| {
-            "No clips captured yet. Capture with MCP capture_clip or POST /api/clips.".to_string()
-        }),
-        demoted_note: None,
-    });
-    let components = vec![hero, table];
-    validate_layout(&components, &REPORT).map_err(|error| anyhow!(error.to_string()))?;
-    let ctx = RenderContext {
-        now: Utc::now(),
-        cite_href: &|ref_id| format!("#cite-{ref_id}"),
-    };
-    Ok(components
-        .iter()
-        .map(|component| render_component(component, &ctx))
-        .collect())
 }
 
 fn post_feed_event(post: &Post, session: Option<&Session>) -> FeedEvent {
@@ -3159,9 +3021,10 @@ channel back to the producing agent. Do not poll for or expect feedback;
 communication with the operator happens somewhere else.
 
 Clip review is also one-way. `POST /api/clips` or the MCP `capture_clip` tool
-marks a post/surface moment into `/clips` and `/api/clips` with the referenced
-session/post context, evidence links, and a deterministic draft caption. It
-does not notify or message the producing agent.
+marks a post/surface moment into `/api/clips` with the referenced session/post
+context, evidence links, and a deterministic draft caption. Clips no longer
+have a top-level human page; captured moments fold into reports now and the
+Wire later. It does not notify or message the producing agent.
 "#;
 
 pub async fn run_doctor(config: DoctorConfig) -> Result<DoctorReport> {
@@ -3295,31 +3158,56 @@ const AESTHETIC_CSS: &str = include_str!("../assets/aesthetic.css");
 const VIEWER_STYLE: &str = r#"
 .glass-desk-header { margin-bottom: var(--ae-space-6); }
 .glass-desk-header:empty { display: none; }
-.glass-now-stats { margin-bottom: 2em; }
+.glass-now-stats { margin-bottom: var(--ae-space-6); }
 .glass-now-stats .ae-icon { align-self: center; }
 .glass-now-notices { display: grid; gap: var(--ae-space-2); margin-bottom: var(--ae-space-5); }
 .glass-now-notice { border: 1px solid var(--ae-line); color: var(--ae-ink-muted); padding: var(--ae-space-3) var(--ae-space-4); font-size: 13px; }
 .glass-now-section { margin-bottom: var(--ae-space-7); }
 .glass-now-section[hidden] { display: none; }
 .glass-now-section > .ae-h { margin-top: 0; }
-.glass-wall { margin-bottom: 1.2em; }
-.glass-wall .ae-wall-card { color: inherit; text-decoration: none; }
-.glass-wall .ae-item { font-family: var(--ae-font-mono); font-weight: var(--ae-w-black); }
-.glass-wall .ae-wall-card:hover .ae-item { text-decoration: underline; text-underline-offset: 0.18em; }
-.mk-quiet-card .ae-wall-mark,
-.mk-quiet-card .ae-item,
-.mk-quiet-card .ae-wall-meta { color: var(--ae-ink-faint); }
-.mk-kind { white-space: nowrap; }
-.glass-wall-empty,
+.glass-now-sort { margin-bottom: var(--ae-space-6); }
+.glass-sort-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--ae-space-3) var(--ae-space-5); padding: 0.8em 0; border-top: 1px solid var(--ae-line); }
+.glass-sort-label { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.12em; color: var(--ae-ink-faint); text-transform: uppercase; }
+.glass-sort-option { background: transparent; border: 0; padding: 0; color: var(--ae-ink-muted); font: inherit; cursor: pointer; }
+.glass-sort-option:hover,
+.glass-sort-option[aria-pressed="true"] { color: var(--ae-ink); font-weight: var(--ae-w-medium); }
+.glass-now-list { border-top: 1px solid var(--ae-line); }
+.glass-now-row { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: var(--ae-space-4); padding: 0.72em 0; border-bottom: 1px solid var(--ae-line); color: inherit; text-decoration: none; }
+.glass-now-row:hover .ae-item { text-decoration: underline; text-underline-offset: 0.18em; }
+.glass-now-row.is-quiet { color: var(--ae-ink-faint); opacity: var(--glass-row-opacity, 0.64); }
+.glass-now-row.is-blocked .glass-now-state,
+.glass-now-row.is-blocked .glass-now-glyph { color: var(--ae-ink); }
+.glass-now-main { min-width: 0; display: flex; flex-direction: column; gap: 0.12em; }
+.glass-now-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.5em; }
+.glass-now-line .ae-item { font-family: var(--ae-font-mono); font-weight: var(--ae-w-black); }
+.glass-now-meta { font-size: 13px; color: var(--ae-ink-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.glass-now-row.is-quiet .glass-now-meta { color: var(--ae-ink-faint); }
+.glass-now-trail { display: inline-flex; align-items: center; gap: 0.45em; white-space: nowrap; }
+.glass-now-glyph { display: inline-flex; align-self: center; color: var(--ae-ink-muted); }
+.glass-now-glyph .ae-icon { align-self: center; }
+.glass-now-state { font-family: var(--ae-font-mono); font-size: 13px; color: var(--ae-ink-muted); }
+.glass-now-empty,
 .glass-wire-empty { color: var(--ae-ink-muted); padding: var(--ae-space-7) 0; text-align: center; }
-.glass-dead { margin: calc(-1 * var(--ae-space-4)) 0 var(--ae-space-7); }
-.glass-dead[hidden] { display: none; }
-.glass-dead-list { display: grid; gap: var(--ae-space-2); }
-.glass-dead-list a { color: var(--ae-ink-muted); text-decoration: none; }
-.glass-dead-list a:hover { color: var(--ae-ink); }
 .glass-wire { margin-bottom: var(--ae-space-7); }
-.glass-wire .ae-list-row { cursor: pointer; }
-.glass-wire .ae-list-row:hover .glass-wire-event { text-decoration: underline; text-underline-offset: 0.18em; }
+.glass-wire-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ae-space-2) var(--ae-space-4); margin-bottom: var(--ae-space-5); }
+.glass-wire-leg { display: inline-flex; align-items: center; gap: 0.4em; font-size: 13px; color: var(--ae-ink-muted); }
+.glass-wire-leg .ae-icon,
+.glass-wire-kind .ae-icon,
+.glass-wire-pin-icon .ae-icon { align-self: center; width: 1em; height: 1em; }
+.glass-wire-pinned { margin: 0 0 var(--ae-space-6); }
+.glass-wire-pin-list { border-block: 1px solid var(--ae-line); }
+.glass-wire-pin-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--ae-space-3); padding: 0.65em 0; border-bottom: 1px solid var(--ae-line); color: inherit; text-decoration: none; }
+.glass-wire-pin-row:last-child { border-bottom: 0; }
+.glass-wire-pin-row:hover .ae-item,
+.glass-wire-tape-row:hover .glass-wire-title { text-decoration: underline; text-underline-offset: 0.18em; }
+.glass-wire-pin-icon { display: inline-flex; align-self: center; color: var(--ae-ink); }
+.glass-wire-pin-meta { display: block; font-size: 13px; color: var(--ae-ink-muted); line-height: 1.5; }
+.glass-wire-tape { border-top: 1px solid var(--ae-line); }
+.glass-wire-tape-row { display: grid; grid-template-columns: 5.8em 1.4em minmax(7em, 0.35fr) minmax(0, 1fr); align-items: baseline; gap: var(--ae-space-3); padding: 0.48em 0; border-bottom: 1px solid var(--ae-line); color: inherit; text-decoration: none; font-family: var(--ae-font-mono); font-size: 13px; line-height: 1.6; }
+.glass-wire-time { color: var(--ae-ink-faint); text-align: right; font-variant-numeric: tabular-nums; }
+.glass-wire-kind { display: inline-flex; align-self: center; color: var(--ae-ink-muted); }
+.glass-wire-agent { color: var(--ae-ink-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-wire-title { color: var(--ae-ink); min-width: 0; overflow-wrap: anywhere; }
 .glass-feed-meta { font-family: var(--ae-font-mono); font-size: 12px; color: var(--ae-ink-muted); }
 .glass-feed-links { display: flex; flex-wrap: wrap; gap: var(--ae-space-2); padding: 0 var(--ae-space-5) var(--ae-space-4); }
 .glass-feed-link { border: 1px solid var(--ae-line); padding: 2px 8px; color: var(--ae-ink-muted); text-decoration: none; font-size: 12px; }
@@ -3344,7 +3232,10 @@ const VIEWER_STYLE: &str = r#"
 @media (max-width: 48rem) {
   .glass-surface iframe { min-height: 200px; }
   .glass-now-stats { margin-bottom: 1.6em; }
-  .glass-wire-event { grid-column: 1 / -1; }
+  .glass-now-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .glass-now-trail { justify-self: start; }
+  .glass-wire-tape-row { grid-template-columns: 4.8em 1.3em minmax(0, 1fr); }
+  .glass-wire-title { grid-column: 1 / -1; padding-left: calc(6.1em + var(--ae-space-3)); }
   .glass-feed-links { padding: 0; }
 }
 "#;
@@ -3353,14 +3244,21 @@ const VIEWER_BODY: &str = r#"
     <div id="desk-header" class="glass-desk-header"></div>
     <div id="now-stats" class="ae-stat-badges glass-now-stats" aria-label="Now summary"></div>
     <div id="now-notices" class="glass-now-notices" aria-live="polite"></div>
-    <section id="wall-section" class="glass-now-section" aria-label="Fleet wall">
-      <p class="ae-h">ON STAGE</p>
-      <div id="wall" class="ae-wall glass-wall"></div>
+    <div id="now-sort" class="ae-settings glass-now-sort" aria-label="Sort agents">
+      <div class="glass-sort-row">
+        <span class="glass-sort-label">Sort</span>
+        <button class="glass-sort-option" type="button" data-now-sort="attention" aria-pressed="true">Attention</button>
+        <button class="glass-sort-option" type="button" data-now-sort="recent" aria-pressed="false">Recent</button>
+        <button class="glass-sort-option" type="button" data-now-sort="name" aria-pressed="false">Name</button>
+      </div>
+    </div>
+    <section id="wall-section" class="glass-now-section" aria-label="The fleet, most urgent first">
+      <p class="ae-h" id="now-heading">THE FLEET — MOST URGENT FIRST</p>
+      <div id="wall" class="glass-now-list"></div>
     </section>
-    <details id="dead" class="ae-fold glass-dead" hidden></details>
     <section id="wire-section" class="glass-now-section" aria-label="The wire">
-      <p class="ae-h">THE WIRE</p>
-      <div id="feed" class="ae-list-rows glass-wire" aria-label="Ambient evidence feed"></div>
+      <p class="ae-h">THE WIRE · TAPE</p>
+      <div id="feed" class="glass-wire" aria-label="Ambient evidence feed"></div>
     </section>
     <section id="posts" aria-label="Status feed"><p class="glass-empty">No live surfaces yet.</p></section>
 <dialog id="feed-dialog" class="ae-dialog">
@@ -3387,6 +3285,8 @@ let currentSessions = new Map();
 let renderedPostNodes = new Map();
 let currentFeedEvents = new Map();
 let lastPayload = '';
+let currentNowCards = [];
+let nowSort = 'attention';
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function ambient() { return !view.agent && !view.session; }
@@ -3471,14 +3371,44 @@ function iconQuiet(cls) {
   return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"></path><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"></path><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"></path><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"></path><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"></path><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"></path><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"></path><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"></path></svg>`;
 }
 
-function wallMark(card) {
-  if (card.status === 'warn') return iconWarn('ae-warn ae-wall-mark');
-  if (card.status === 'quiet') return iconQuiet('ae-wall-mark');
-  return iconCheck('ae-ok ae-wall-mark');
+function iconFileText(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg>`;
 }
 
-function traceMark(item) {
-  return kindLabel(item.kind) === 'blocked' ? iconWarn('ae-warn') : iconTick('');
+function iconClock(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`;
+}
+
+function iconMessage(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>`;
+}
+
+function iconTag(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42Z"></path><path d="M7.5 7.5h.01"></path></svg>`;
+}
+
+function iconQuestion(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 1 1 5.83 1c0 2-3 2-3 4"></path><path d="M12 17h.01"></path></svg>`;
+}
+
+function iconList(cls) {
+  return `<svg class="ae-icon ${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg>`;
+}
+
+function stateGlyph(card) {
+  if (card.status === 'warn') return iconWarn('ae-warn');
+  if (card.status === 'quiet' || card.quiet) return iconQuiet('');
+  return iconCheck('ae-ok');
+}
+
+function stateWord(card) {
+  if (card.status === 'warn') return 'blocked';
+  if (card.status === 'quiet' || card.quiet) return 'quiet';
+  return 'live';
+}
+
+function stripKindPrefix(text) {
+  return String(text || '').replace(/^(blocked|shipped|question|release|report|note|digest|receipt):\s*/i, '');
 }
 
 function primaryEventHref(event) {
@@ -3494,11 +3424,10 @@ function renderStats(stats) {
   const s = stats || {};
   const need = s.needYouCount;
   host.innerHTML = `
-    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.agentsLive ?? 0)}</span><span class="ae-stat-label">agents live</span></span>
-    <span class="ae-stat-badge">${need ? iconWarn('ae-warn') : ''}<span class="ae-stat-value">${esc(need ?? 'n/a')}</span><span class="ae-stat-label">need you</span></span>
-    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.postsToday ?? 0)}</span><span class="ae-stat-label">posts today</span></span>
-    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.sessionsToday ?? 0)}</span><span class="ae-stat-label">sessions</span></span>
-    <span class="ae-stat-badge"><span class="ae-stat-value">${esc(s.secondsSinceLastEvent === null || s.secondsSinceLastEvent === undefined ? 'none' : ageLabel(s.secondsSinceLastEvent))}</span><span class="ae-stat-label">since last event</span></span>`;
+    <span class="ae-stat-badge">${iconCheck('ae-ok')}<span class="ae-stat-value">${esc(s.agentsLive ?? 0)}</span><span class="ae-stat-label">working</span></span>
+    <span class="ae-stat-badge">${iconWarn(need ? 'ae-warn' : '')}<span class="ae-stat-value">${esc(need ?? 'n/a')}</span><span class="ae-stat-label">need you</span></span>
+    <span class="ae-stat-badge">${iconFileText('')}<span class="ae-stat-value">${esc(s.postsToday ?? 0)}</span><span class="ae-stat-label">posts</span></span>
+    <span class="ae-stat-badge">${iconClock('')}<span class="ae-stat-value">${esc(s.secondsSinceLastEvent === null || s.secondsSinceLastEvent === undefined ? 'none' : ageLabel(s.secondsSinceLastEvent))}</span><span class="ae-stat-label">fresh</span></span>`;
 }
 
 function renderNotices(notices) {
@@ -3508,38 +3437,71 @@ function renderNotices(notices) {
   host.innerHTML = items.map(notice => `<p class="glass-now-notice">${esc(notice.message || '')}</p>`).join('');
 }
 
-function buildWallCard(card) {
+function nowStateCopy(card) {
+  const word = stateWord(card);
+  const age = ageLabel(card.ageSeconds);
+  const act = stripKindPrefix(card.meta || card.powderTitle || '');
+  if (word === 'blocked') return `blocked ${age} — ${act || 'needs attention'}`;
+  if (word === 'quiet') return `quiet · ${age}`;
+  return `live · ${act || 'publishing'}`;
+}
+
+function attentionRank(card) {
+  if (stateWord(card) === 'blocked') return 0;
+  if (stateWord(card) === 'live') return 1;
+  return 2;
+}
+
+function sortNowCards(cards) {
+  return [...(cards || [])].sort((left, right) => {
+    if (nowSort === 'name') return String(left.agent || '').localeCompare(String(right.agent || ''));
+    const leftTime = Number(left.latestAt || left.claimedAt || 0);
+    const rightTime = Number(right.latestAt || right.claimedAt || 0);
+    if (nowSort === 'recent') return rightTime - leftTime || String(left.agent || '').localeCompare(String(right.agent || ''));
+    const leftRank = attentionRank(left);
+    const rightRank = attentionRank(right);
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    if (leftRank === 2) return Number(left.ageSeconds || 0) - Number(right.ageSeconds || 0) || String(left.agent || '').localeCompare(String(right.agent || ''));
+    return rightTime - leftTime || String(left.agent || '').localeCompare(String(right.agent || ''));
+  });
+}
+
+function updateSortControls() {
+  document.querySelectorAll('[data-now-sort]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.nowSort === nowSort));
+  });
+}
+
+function quietOpacity(card) {
+  if (stateWord(card) !== 'quiet') return '1';
+  const days = Math.min(3, Math.max(0, Number(card.ageSeconds || 0) / 86400));
+  return String(Math.max(0.36, 0.72 - days * 0.12).toFixed(2));
+}
+
+function buildNowRow(card) {
   const tag = card.powderTag ? `<span class="ae-tag">${esc(card.powderTag)}</span>` : '';
-  const trace = (card.trace || []).map(traceMark).join('');
-  return `<a class="ae-wall-card${card.quiet ? ' mk-quiet-card' : ''}" href="${esc(safeHref(card.href || `/agent/${encodeURIComponent(card.agent || 'agent')}`))}">
-    <span>
-      <span class="ae-wall-head">${wallMark(card)}<span class="ae-item">${esc(card.agent || 'agent')}</span>${tag}</span>
-      <span class="ae-wall-meta">${esc(card.meta || '')}</span>
+  const word = stateWord(card);
+  return `<a class="glass-now-row is-${word}" data-agent-row="${esc(card.agent || 'agent')}" href="${esc(safeHref(card.href || `/agent/${encodeURIComponent(card.agent || 'agent')}`))}" style="--glass-row-opacity:${quietOpacity(card)}">
+    <span class="glass-now-main">
+      <span class="glass-now-line"><span class="ae-item">${esc(card.agent || 'agent')}</span>${tag}</span>
+      <span class="glass-now-meta">${esc(nowStateCopy(card))}</span>
     </span>
-    <span class="ae-wall-figure"><span class="ae-wall-time">${esc(ageLabel(card.ageSeconds))}</span>${trace ? `<span class="ae-wall-trace">${trace}</span>` : ''}</span>
+    <span class="glass-now-trail"><span class="glass-now-glyph">${stateGlyph(card)}</span><span class="glass-now-state">${esc(word)}</span></span>
   </a>`;
 }
 
 function renderNowWall(cards) {
   const wall = document.getElementById('wall');
-  const items = cards || [];
+  currentNowCards = cards || [];
+  const items = sortNowCards(currentNowCards);
+  const heading = document.getElementById('now-heading');
+  if (heading) heading.textContent = `THE FLEET — MOST URGENT FIRST · ${items.length}`;
+  updateSortControls();
   if (!items.length) {
-    wall.innerHTML = `<p class="glass-wall-empty">Nothing on stage. Agents appear here when they claim a Powder card or publish &mdash; <a href="/setup">Wire an agent</a> shows how.</p>`;
+    wall.innerHTML = `<p class="glass-now-empty">Nothing on stage. Agents appear here when they claim a Powder card or publish &mdash; <a href="/setup">Wire an agent</a> shows how.</p>`;
     return;
   }
-  wall.innerHTML = items.map(buildWallCard).join('');
-}
-
-function renderDead(dead) {
-  const host = document.getElementById('dead');
-  if (!dead || !dead.sessionCount) {
-    host.hidden = true;
-    host.innerHTML = '';
-    return;
-  }
-  host.hidden = false;
-  const rows = (dead.sessions || []).map(session => `<a href="${esc(safeHref(session.href))}">${esc(session.agent)} · ${esc(session.title)} · ${esc(ageLabel(session.ageSeconds))}</a>`).join('');
-  host.innerHTML = `<summary><span class="ae-dim">FINISHED IN THE LAST 24H</span><span class="ae-dim">${esc(dead.agentCount)} agents · ${esc(dead.sessionCount)} sessions &rarr;</span></summary><div class="glass-dead-list">${rows}</div>`;
+  wall.innerHTML = items.map(buildNowRow).join('');
 }
 
 function landmarkLine(landmark) {
@@ -3548,14 +3510,40 @@ function landmarkLine(landmark) {
   return ` Landmark: ${landmark.status || 'unknown'}${message}.`;
 }
 
-function buildWireRow(event) {
+function kindGlyph(kind) {
+  const k = kindLabel(kind);
+  if (k === 'shipped') return iconTick('');
+  if (k === 'report') return iconFileText('');
+  if (k === 'receipt') return iconCheck('');
+  if (k === 'release') return iconTag('');
+  if (k === 'blocked') return iconWarn('ae-warn');
+  if (k === 'question') return iconQuestion('');
+  if (k === 'digest') return iconList('');
+  return iconMessage('');
+}
+
+function isPinnedKind(event) {
+  const kind = kindLabel(event.kind);
+  return kind === 'blocked' || kind === 'question';
+}
+
+function buildPinnedWireRow(event) {
   const kind = kindLabel(event.kind);
   const actor = event.agent || event.source || 'glass';
-  return `<a class="ae-list-row" href="${esc(primaryEventHref(event))}" data-feed-open="${esc(event.id)}">
-    <span class="ae-list-cell ae-list-time"><span class="ae-list-label">TIME</span><span class="ae-list-value">${esc(eventTimeShort(event.occurredAt))}</span></span>
-    <span class="ae-list-cell"><span class="ae-list-label">AGENT</span><span class="ae-list-value">${esc(actor)}</span></span>
-    <span class="ae-list-cell"><span class="ae-list-label">KIND</span><span class="ae-list-value mk-kind"><span class="ae-chip ae-cat-${catForKind(kind)}">${esc(kind)}</span></span></span>
-    <span class="ae-list-cell glass-wire-event"><span class="ae-list-label">EVENT</span><span class="ae-list-value">${esc(event.title || event.summary || '')}</span></span>
+  return `<a class="glass-wire-pin-row" href="${esc(primaryEventHref(event))}" data-feed-open="${esc(event.id)}">
+    <span class="glass-wire-pin-icon">${iconWarn('ae-warn')}</span>
+    <span><span class="ae-item">${esc(event.title || event.summary || '')}</span><span class="glass-wire-pin-meta">${esc(kind)} · ${esc(actor)} · ${esc(eventTimeShort(event.occurredAt))}</span></span>
+  </a>`;
+}
+
+function buildWireTapeRow(event) {
+  const kind = kindLabel(event.kind);
+  const actor = event.agent || event.source || 'glass';
+  return `<a class="glass-wire-tape-row" href="${esc(primaryEventHref(event))}" data-feed-open="${esc(event.id)}">
+    <span class="glass-wire-time">${esc(eventTimeShort(event.occurredAt))}</span>
+    <span class="glass-wire-kind" title="${esc(kind)}">${kindGlyph(kind)}</span>
+    <span class="glass-wire-agent">${esc(actor)}</span>
+    <span class="glass-wire-title">${esc(event.title || event.summary || '')}</span>
   </a>`;
 }
 
@@ -3566,7 +3554,13 @@ function renderWire(host, events, landmark) {
     host.innerHTML = `<p class="glass-wire-empty">No ambient evidence yet.${esc(landmarkLine(landmark))}</p>`;
     return;
   }
-  host.innerHTML = feed.map(buildWireRow).join('');
+  const pinned = feed.filter(isPinnedKind);
+  const tape = feed.filter(event => !isPinnedKind(event));
+  const legendKinds = [...new Set(feed.map(event => kindLabel(event.kind)))];
+  const legend = `<div class="glass-wire-legend" aria-label="Legend"><span class="glass-sort-label">legend</span>${legendKinds.map(kind => `<span class="glass-wire-leg">${kindGlyph(kind)}<span>${esc(kind)}</span></span>`).join('')}</div>`;
+  const pinnedBand = pinned.length ? `<div class="ae-findings glass-wire-pinned"><p class="ae-findings-title">NEEDS ATTENTION · ${pinned.length}</p><div class="glass-wire-pin-list">${pinned.map(buildPinnedWireRow).join('')}</div></div>` : '';
+  const tapeRows = tape.length ? `<div class="glass-wire-tape" role="list">${tape.map(buildWireTapeRow).join('')}</div>` : `<p class="glass-wire-empty">No chronological wire events.${esc(landmarkLine(landmark))}</p>`;
+  host.innerHTML = `${legend}${pinnedBand}${tapeRows}`;
   host.querySelectorAll('[data-feed-open]').forEach(row => {
     row.addEventListener('click', event => {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -3597,6 +3591,14 @@ document.querySelector('[data-feed-close]').addEventListener('click', () => {
   if (dialog.close) dialog.close();
   else dialog.removeAttribute('open');
 });
+
+document.querySelectorAll('[data-now-sort]').forEach((button) => {
+  button.addEventListener('click', () => {
+    nowSort = button.dataset.nowSort || 'attention';
+    renderNowWall(currentNowCards);
+  });
+});
+updateSortControls();
 
 function surfaceHtml(post, surface, index) {
   const kind = surface.kind;
@@ -3681,11 +3683,8 @@ function setNowHidden(hidden) {
     const el = document.getElementById(id);
     if (el) el.hidden = hidden;
   });
-  if (hidden) {
-    const dead = document.getElementById('dead');
-    dead.hidden = true;
-    dead.innerHTML = '';
-  }
+  const sort = document.getElementById('now-sort');
+  if (sort) sort.hidden = hidden;
 }
 
 function renderNow(data) {
@@ -3694,7 +3693,6 @@ function renderNow(data) {
   renderStats(data.stats || {});
   renderNotices(data.notices || []);
   renderNowWall(data.wall || []);
-  renderDead(data.dead || {});
   renderWire(document.getElementById('feed'), data.wire || [], data.landmark || null);
 }
 

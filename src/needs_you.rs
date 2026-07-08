@@ -852,9 +852,13 @@ const NEEDS_YOU_SCRIPT: &str = r#"
     try { localStorage.removeItem('ny-draft-' + runId); } catch (err) {}
   }
   function updateRailCount(count) {
-    var link = document.querySelector('.ae-rail a[href="/needs-you"]');
-    if (!link || typeof count !== 'number') return;
-    link.textContent = 'Needs you · ' + count;
+    if (typeof count !== 'number') return;
+    document.querySelectorAll('[data-needs-you-count]').forEach(function(el){
+      el.textContent = String(count);
+    });
+    document.querySelectorAll('a[href="/needs-you"][aria-label^="Needs you"]').forEach(function(link){
+      link.setAttribute('aria-label', 'Needs you ' + count);
+    });
   }
 
   function wireAnswerButtons(scope) {
