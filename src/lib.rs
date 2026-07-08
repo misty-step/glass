@@ -24,6 +24,7 @@ mod backlog_report;
 pub mod canary;
 mod needs_you;
 mod rep1;
+mod report_components;
 mod reports;
 mod review_report;
 mod shell;
@@ -509,6 +510,26 @@ impl Glass {
         store.list_reports()
     }
 
+    pub(crate) fn find_report_for_query(
+        &self,
+        kind: &str,
+        scope_type: &str,
+        scope_value: Option<&str>,
+        window_start: Option<i64>,
+        window_end: Option<i64>,
+        min_generated_at: Option<i64>,
+    ) -> Result<Option<reports::ReportRecord>> {
+        let store = self.lock()?;
+        store.find_report_for_query(
+            kind,
+            scope_type,
+            scope_value,
+            window_start,
+            window_end,
+            min_generated_at,
+        )
+    }
+
     pub(crate) fn find_activity_digest_report(
         &self,
         window_start: i64,
@@ -976,18 +997,45 @@ impl Store {
         window_start: i64,
         window_end: i64,
     ) -> Result<Option<reports::ReportRecord>> {
+        self.find_report_for_query(
+            "activity-digest",
+            "fleet",
+            None,
+            Some(window_start),
+            Some(window_end),
+            None,
+        )
+    }
+
+    fn find_report_for_query(
+        &self,
+        kind: &str,
+        scope_type: &str,
+        scope_value: Option<&str>,
+        window_start: Option<i64>,
+        window_end: Option<i64>,
+        min_generated_at: Option<i64>,
+    ) -> Result<Option<reports::ReportRecord>> {
         self.conn
             .query_row(
                 "SELECT id, kind, scope_type, scope_value, window_start, window_end, title, doc_html, meta_json, generated_at, requested_by
                  FROM reports
-                 WHERE kind = 'activity-digest'
-                   AND scope_type = 'fleet'
-                   AND scope_value IS NULL
-                   AND window_start = ?1
-                   AND window_end = ?2
+                 WHERE kind = ?1
+                   AND scope_type = ?2
+                   AND ((?3 IS NULL AND scope_value IS NULL) OR scope_value = ?3)
+                   AND ((?4 IS NULL AND window_start IS NULL) OR window_start = ?4)
+                   AND ((?5 IS NULL AND window_end IS NULL) OR window_end = ?5)
+                   AND (?6 IS NULL OR generated_at >= ?6)
                  ORDER BY generated_at DESC, id DESC
                  LIMIT 1",
-                params![window_start, window_end],
+                params![
+                    kind,
+                    scope_type,
+                    scope_value,
+                    window_start,
+                    window_end,
+                    min_generated_at,
+                ],
                 row_to_report,
             )
             .optional()

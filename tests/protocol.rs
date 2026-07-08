@@ -987,7 +987,7 @@ async fn window_report_streams_a_skeleton_before_the_shelf_fetch_resolves() {
 }
 
 #[tokio::test]
-async fn reports_shell_serves_the_generator_and_empty_library() {
+async fn reports_shell_serves_the_sentence_builder_without_library() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
             Request::builder()
@@ -1001,10 +1001,13 @@ async fn reports_shell_serves_the_generator_and_empty_library() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert_shared_rail(&html, Some("/reports"));
-    assert!(html.contains("GENERATE A REPORT"));
-    assert!(html.contains("Activity digest"));
-    assert!(html.contains("PLATE 1 - THE LIBRARY"));
-    assert!(html.contains("No generated reports yet."));
+    assert!(html.contains("REPORT QUERY"));
+    assert!(html.contains("Show me"));
+    assert!(html.contains("the whole fleet"));
+    assert!(html.contains("the past 24h"));
+    assert!(html.contains(r#"id="reports-result""#));
+    assert!(!html.contains("PLATE 1 - THE LIBRARY"));
+    assert!(!html.contains("reports-library"));
 }
 
 #[tokio::test]
@@ -1124,6 +1127,8 @@ async fn activity_report_generation_persists_and_reopens_by_stable_url() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["url"], "/reports/R-001");
+    assert_eq!(value["cached"], false);
+    assert!(value["html"].as_str().unwrap().contains("Reportable post"));
 
     let reopened = app
         .oneshot(
@@ -1140,11 +1145,11 @@ async fn activity_report_generation_persists_and_reopens_by_stable_url() {
     assert_shared_rail(&html, Some("/reports"));
     assert!(html.contains("Activity digest - fleet"));
     assert!(html.contains("Reportable post"));
-    assert!(html.contains("Blocked"));
+    assert!(html.contains("blocked"));
 }
 
 #[tokio::test]
-async fn custom_activity_report_generation_adds_a_new_library_row_each_time() {
+async fn custom_activity_report_generation_uses_cache_until_regenerated() {
     let glass = Glass::memory().expect("memory store");
     glass
         .publish_post(PublishPost {
@@ -1175,25 +1180,69 @@ async fn custom_activity_report_generation_adds_a_new_library_row_each_time() {
         "requestedBy": "test"
     });
 
-    for expected_id in ["R-001", "R-002"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/reports")
-                    .header("content-type", "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["id"], expected_id);
-        assert_eq!(value["url"], format!("/reports/{expected_id}"));
-    }
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("first response");
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = first.into_body().collect().await.unwrap().to_bytes();
+    let first_value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(first_value["id"], "R-001");
+    assert_eq!(first_value["cached"], false);
+
+    let repeat = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("repeat response");
+    assert_eq!(repeat.status(), StatusCode::OK);
+    let body = repeat.into_body().collect().await.unwrap().to_bytes();
+    let repeat_value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(repeat_value["id"], "R-001");
+    assert_eq!(repeat_value["url"], "/reports/R-001");
+    assert_eq!(repeat_value["cached"], true);
+    assert!(
+        repeat_value["cacheNote"]
+            .as_str()
+            .unwrap()
+            .starts_with("cached")
+    );
+
+    let mut regenerate_payload = payload.clone();
+    regenerate_payload["regenerate"] = json!(true);
+    let regenerated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(regenerate_payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("regenerate response");
+    assert_eq!(regenerated.status(), StatusCode::OK);
+    let body = regenerated.into_body().collect().await.unwrap().to_bytes();
+    let regenerated_value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(regenerated_value["id"], "R-002");
+    assert_eq!(regenerated_value["url"], "/reports/R-002");
+    assert_eq!(regenerated_value["cached"], false);
 
     let response = app
         .oneshot(
@@ -1203,7 +1252,7 @@ async fn custom_activity_report_generation_adds_a_new_library_row_each_time() {
                 .unwrap(),
         )
         .await
-        .expect("library response");
+        .expect("cache listing response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();

@@ -7,7 +7,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use glance_catalog::leaf::Metric;
-use glance_catalog::structural::{Cell, CellValue, ColumnSpec, Disclosure, Hero, Row, Table};
+use glance_catalog::structural::{Cell, CellValue, ColumnSpec, Hero, Row, Table};
 use glance_catalog::{Component, InlineNode, RenderContext, render_component};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,10 +15,12 @@ use std::time::Duration as StdDuration;
 use tracing::{info, warn};
 
 use crate::{
-    ApiError, ClipQueueItem, EvidenceLink, FeedKind, Glass, Post, Session, backlog_report,
-    declared_summary, evidence_links_for_post, feed_kind_for_post, needs_you, rep1, review_report,
-    sanctum_url, shell,
+    ApiError, ClipQueueItem, FeedKind, Glass, Post, Session, backlog_report, declared_summary,
+    feed_kind_for_post, needs_you, rep1, report_components as rc, review_report, sanctum_url,
+    shell,
 };
+
+const REPORT_CACHE_FRESHNESS_SECONDS: i64 = 30 * 60;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NewReport {
@@ -76,6 +78,8 @@ pub(crate) struct GenerateReportRequest {
     scope: Value,
     #[serde(default)]
     window: Value,
+    #[serde(default, alias = "regenerate", alias = "force")]
+    regenerate: bool,
     #[serde(default, alias = "requestedBy")]
     requested_by: Option<String>,
 }
@@ -259,6 +263,11 @@ struct GeneratedDoc {
     meta_json: Value,
 }
 
+struct ReportGeneration {
+    report: ReportRecord,
+    cached: bool,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum StandingDigestCadence {
     Daily,
@@ -321,31 +330,23 @@ struct PowderFetch {
 }
 
 struct SynthesisFetch {
+    components: Option<Vec<rc::ReportComponent>>,
     html: Option<String>,
     status: String,
 }
 
-#[derive(Default)]
-struct AgentBucket {
-    posts: Vec<ActivityPost>,
-    clips: Vec<ClipQueueItem>,
-    blocked: Vec<ActivityPost>,
-}
-
 pub(crate) async fn reports_shell(
-    State(glass): State<Glass>,
+    State(_glass): State<Glass>,
     Query(query): Query<ReportsPageQuery>,
 ) -> Result<Html<String>, ApiError> {
-    let reports = glass
-        .list_reports()
-        .map_err(|error| crate::api_failure("glass.reports.list.failed", "/reports", error))?;
+    let styles = reports_styles();
     Ok(Html(shell::render_shell(shell::Shell {
         title: "Glass - Reports",
         active: Some(shell::Place::Reports),
         needs_you_count: needs_you::awaiting_input_count().await,
         sanctum_url: &sanctum_url(),
-        styles: REPORTS_STYLE,
-        body: &render_reports_body(&reports, &query),
+        styles: &styles,
+        body: &render_reports_body(&query),
         scripts: REPORTS_SCRIPT,
     })))
 }
@@ -358,12 +359,13 @@ pub(crate) async fn report_doc_shell(
         .get_report(&id)
         .map_err(|error| crate::api_failure("glass.reports.get.failed", "/reports/{id}", error))?;
     let body = render_report_doc_body(&report);
+    let styles = reports_styles();
     Ok(Html(shell::render_shell(shell::Shell {
         title: &format!("Glass - {}", report.id),
         active: Some(shell::Place::Reports),
         needs_you_count: needs_you::awaiting_input_count().await,
         sanctum_url: &sanctum_url(),
-        styles: REPORTS_STYLE,
+        styles: &styles,
         body: &body,
         scripts: "",
     })))
@@ -382,10 +384,20 @@ pub(crate) async fn post_report(
     State(glass): State<Glass>,
     Json(input): Json<GenerateReportRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let report = generate_and_persist(&glass, input).await.map_err(|error| {
+    let generation = generate_and_persist(&glass, input).await.map_err(|error| {
         crate::api_failure("glass.reports.generate.failed", "/api/reports", error)
     })?;
-    Ok(Json(json!({ "id": report.id, "url": report.url() })))
+    let report = generation.report;
+    Ok(Json(json!({
+        "id": report.id,
+        "url": report.url(),
+        "title": report.title,
+        "html": render_inline_report(&report, generation.cached),
+        "cached": generation.cached,
+        "generatedAt": report.generated_at,
+        "generatedClock": format_generated_clock(report.generated_at),
+        "cacheNote": cache_note(report.generated_at, generation.cached),
+    })))
 }
 
 pub(crate) fn start_standing_digest_scheduler(glass: Glass) {
@@ -410,7 +422,10 @@ pub(crate) async fn redirect_backlog(AxumPath(repo): AxumPath<String>) -> Respon
     ))
 }
 
-async fn generate_and_persist(glass: &Glass, input: GenerateReportRequest) -> Result<ReportRecord> {
+async fn generate_and_persist(
+    glass: &Glass,
+    input: GenerateReportRequest,
+) -> Result<ReportGeneration> {
     let kind = ReportKind::parse(&input.kind)?;
     let scope = ReportScope::parse(&input.scope)?;
     let window = if kind.needs_window() {
@@ -426,6 +441,23 @@ async fn generate_and_persist(glass: &Glass, input: GenerateReportRequest) -> Re
         .unwrap_or("you")
         .to_string();
 
+    if !input.regenerate {
+        let min_generated_at = Some(Utc::now().timestamp() - REPORT_CACHE_FRESHNESS_SECONDS);
+        if let Some(report) = glass.find_report_for_query(
+            kind.as_str(),
+            &scope.scope_type,
+            scope.scope_value.as_deref(),
+            window.as_ref().map(|window| window.start),
+            window.as_ref().map(|window| window.end),
+            min_generated_at,
+        )? {
+            return Ok(ReportGeneration {
+                report,
+                cached: true,
+            });
+        }
+    }
+
     let generated = match kind {
         ReportKind::ActivityDigest => {
             generate_activity_digest(glass, &scope, window.as_ref().expect("window")).await?
@@ -435,7 +467,7 @@ async fn generate_and_persist(glass: &Glass, input: GenerateReportRequest) -> Re
         ReportKind::ReviewIndex => generate_review_index(glass)?,
     };
 
-    glass.create_report(NewReport {
+    let report = glass.create_report(NewReport {
         kind: kind.as_str().to_string(),
         scope_type: scope.scope_type,
         scope_value: scope.scope_value,
@@ -445,6 +477,10 @@ async fn generate_and_persist(glass: &Glass, input: GenerateReportRequest) -> Re
         doc_html: generated.doc_html,
         meta_json: generated.meta_json,
         requested_by,
+    })?;
+    Ok(ReportGeneration {
+        report,
+        cached: false,
     })
 }
 
@@ -622,97 +658,40 @@ fn report_summary(report: &ReportRecord) -> Value {
     })
 }
 
-fn render_reports_body(reports: &[ReportRecord], query: &ReportsPageQuery) -> String {
+fn render_reports_body(query: &ReportsPageQuery) -> String {
     let initial_kind = html_escape(query.kind.as_deref().unwrap_or("activity-digest"));
     let initial_scope = html_escape(query.scope.as_deref().unwrap_or("fleet"));
     format!(
         r#"<div class="reports-shell" data-initial-kind="{initial_kind}" data-initial-scope="{initial_scope}">
-  <section class="reports-generator">
-    <p class="ae-plate-cap">GENERATE A REPORT</p>
-    <div class="reports-gen-row">
-      <span class="ae-h">WINDOW</span>
-      <span class="reports-chipset" data-report-group="window">
-        <button type="button" class="reports-chip" data-window="today">Today</button>
-        <button type="button" class="reports-chip" data-window="yesterday">Yesterday</button>
-        <button type="button" class="reports-chip" data-window="this-week">This week</button>
-        <button type="button" class="reports-chip is-on" data-window="last-week">Last week</button>
-        <button type="button" class="reports-chip" data-window="custom">Custom</button>
-      </span>
-      <code class="reports-range" id="reports-range"></code>
-    </div>
+  <section class="reports-ask" aria-labelledby="reports-ask-title">
+    <p class="ae-plate-cap" id="reports-ask-title">REPORT QUERY</p>
+    <p class="reports-sentence">
+      <span>Show me</span>
+      <select class="reports-slot" id="reports-scope" aria-label="scope">
+        <option value="fleet">the whole fleet</option>
+        <option value="agent">one agent</option>
+        <option value="repo">one repo</option>
+      </select>
+      <input class="ae-input reports-scope-value" id="reports-scope-value" aria-label="agent or repo" placeholder="agent name">
+      <span>over</span>
+      <select class="reports-slot" id="reports-window" aria-label="window">
+        <option value="past-hour">the past hour</option>
+        <option value="past-24h" selected>the past 24h</option>
+        <option value="past-week">the past week</option>
+        <option value="past-month">the past month</option>
+        <option value="custom">custom range</option>
+      </select>
+      <button class="ae-button ae-button-compact" id="reports-run" type="button">Run</button>
+    </p>
     <div class="reports-custom" id="reports-custom">
       <label>Start <input class="ae-input" id="reports-start" type="date"></label>
       <label>End <input class="ae-input" id="reports-end" type="date"></label>
     </div>
-    <div class="reports-gen-row">
-      <span class="ae-h">SCOPE</span>
-      <span class="reports-chipset" data-report-group="scope">
-        <button type="button" class="reports-chip is-on" data-scope="fleet">Whole fleet</button>
-        <button type="button" class="reports-chip" data-scope="agent">One agent</button>
-        <button type="button" class="reports-chip" data-scope="repo">One repo</button>
-      </span>
-      <input class="ae-input reports-scope-value" id="reports-scope-value" placeholder="agent or repo" aria-label="scope value">
-    </div>
-    <div class="reports-gen-row">
-      <span class="ae-h">KIND</span>
-      <span class="reports-chipset" data-report-group="kind">
-        <button type="button" class="reports-chip is-on" data-kind="activity-digest">Activity digest</button>
-        <button type="button" class="reports-chip" data-kind="backlog">Backlog</button>
-        <button type="button" class="reports-chip" data-kind="review-index">Review index</button>
-        <button type="button" class="reports-chip" data-kind="fleet-digest">Fleet digest</button>
-      </span>
-      <span></span>
-    </div>
-    <button class="ae-button" id="reports-generate" type="button">Generate report</button>
-    <span class="reports-status" id="reports-status" role="status"></span>
+    <p class="reports-cache-line"><span id="reports-status" role="status"></span><button class="reports-regenerate" id="reports-regenerate" type="button" hidden>regenerate</button></p>
   </section>
-
-  <section class="ae-plate reports-library">
-    <p class="ae-plate-cap">PLATE 1 - THE LIBRARY - EVERY GENERATED REPORT, NEWEST FIRST</p>
-    <div class="reports-table-scroll">
-      <table class="ae-table">
-        <thead><tr><th>ID</th><th>REPORT</th><th>WINDOW</th><th>SCOPE</th><th>GENERATED</th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
-    </div>
-  </section>
+  <section class="reports-result" id="reports-result" aria-live="polite"></section>
 </div>"#,
-        rows = render_library_rows(reports),
     )
-}
-
-fn render_library_rows(reports: &[ReportRecord]) -> String {
-    if reports.is_empty() {
-        return r#"<tr><td data-label="ID" colspan="5">No generated reports yet.</td></tr>"#
-            .to_string();
-    }
-    reports
-        .iter()
-        .map(|report| {
-            format!(
-                r#"<tr>
-  <td data-label="ID">{id}</td>
-  <td data-label="REPORT"><a href="{url}">{title}</a></td>
-  <td data-label="WINDOW">{window}</td>
-  <td data-label="SCOPE">{scope}</td>
-  <td data-label="GENERATED">{generated} - {requested_by}</td>
-</tr>"#,
-                id = html_escape(&report.id),
-                url = html_escape(&report.url()),
-                title = html_escape(&report.title),
-                window = html_escape(&format_report_window(
-                    report.window_start,
-                    report.window_end
-                )),
-                scope = html_escape(&scope_label(
-                    &report.scope_type,
-                    report.scope_value.as_deref()
-                )),
-                generated = html_escape(&format_timestamp(report.generated_at)),
-                requested_by = html_escape(&report.requested_by),
-            )
-        })
-        .collect()
 }
 
 fn render_report_doc_body(report: &ReportRecord) -> String {
@@ -745,6 +724,33 @@ fn render_report_doc_body(report: &ReportRecord) -> String {
     )
 }
 
+fn render_inline_report(report: &ReportRecord, cached: bool) -> String {
+    format!(
+        r#"<article class="ae-doc reports-doc reports-inline-doc" data-report-id="{id}">
+  <header class="reports-doc-head">
+    <div class="reports-inline-headline">
+      <p class="ae-plate-cap">{scope} - {window}</p>
+      <span class="reports-cache-note">{cache_note}</span>
+    </div>
+    <h1>{title}</h1>
+  </header>
+  <div class="reports-doc-body">{doc_html}</div>
+</article>"#,
+        id = html_escape(&report.id),
+        scope = html_escape(&scope_label(
+            &report.scope_type,
+            report.scope_value.as_deref()
+        )),
+        window = html_escape(&format_report_window(
+            report.window_start,
+            report.window_end
+        )),
+        cache_note = html_escape(&cache_note(report.generated_at, cached)),
+        title = html_escape(&report.title),
+        doc_html = report.doc_html,
+    )
+}
+
 async fn generate_activity_digest(
     glass: &Glass,
     scope: &ReportScope,
@@ -763,28 +769,28 @@ async fn generate_activity_digest(
         .filter(|item| scope.matches_session(&item.context.session))
         .collect::<Vec<_>>();
     let powder = fetch_completed_powder_cards(scope, window).await;
-    let synthesis = fetch_synthesis_html(scope, window).await;
+    let blocked_posts = posts
+        .iter()
+        .filter(|item| feed_kind_for_post(&item.post) == FeedKind::Blocked)
+        .cloned()
+        .collect::<Vec<_>>();
     let blocked_count = posts
         .iter()
         .filter(|item| feed_kind_for_post(&item.post) == FeedKind::Blocked)
         .count();
+    let synthesis = fetch_synthesis_components(scope, window, &posts, &clips, &powder).await;
+    let components = synthesis.components.unwrap_or_else(|| {
+        build_activity_components(scope, window, &posts, &clips, &powder.cards, &blocked_posts)
+    });
 
-    let mut html = render_component_list(&[activity_hero(
-        scope,
-        window,
-        powder.cards.len(),
-        posts.len(),
-        clips.len(),
-        blocked_count,
-    )])?;
+    let mut html = rc::render_components(&components);
     if let Some(synthesis_html) = synthesis.html.as_deref() {
-        html.push_str("<section class=\"reports-synthesis\"><p class=\"ae-plate-cap\">SYNTHESIS NARRATIVE</p>");
+        html.push_str(
+            "<section class=\"reports-synthesis\"><p class=\"ae-plate-cap\">LEGACY SYNTHESIS</p>",
+        );
         html.push_str(synthesis_html);
         html.push_str("</section>");
     }
-    let mut sections = vec![powder_completion_table(&powder.cards)];
-    sections.extend(agent_activity_sections(posts.clone(), clips.clone()));
-    html.push_str(&render_component_list(&sections)?);
 
     Ok(GeneratedDoc {
         title: format!("Activity digest - {}", scope.label()),
@@ -808,10 +814,221 @@ async fn generate_activity_digest(
                 "clips": clips.len(),
                 "blocked": blocked_count,
             },
+            "components": components,
             "powderStatus": powder.status,
             "synthesisStatus": synthesis.status,
         }),
     })
+}
+
+fn build_activity_components(
+    scope: &ReportScope,
+    window: &ResolvedWindow,
+    posts: &[ActivityPost],
+    clips: &[ClipQueueItem],
+    cards: &[PowderCard],
+    blocked_posts: &[ActivityPost],
+) -> Vec<rc::ReportComponent> {
+    let hourly = hourly_activity_series(window, posts, cards);
+    let repo_pairs = repo_meter_pairs(cards);
+    let mut components = vec![
+        rc::ReportComponent::Prose {
+            text: format!(
+                "{}: {} completed Powder card(s), {} Glass post(s), {} clip(s).",
+                window.label,
+                cards.len(),
+                posts.len(),
+                clips.len()
+            ),
+        },
+        rc::ReportComponent::StatBand {
+            figures: vec![
+                figure(cards.len(), "completed cards", false),
+                figure(posts.len(), "Glass posts", false),
+                figure(clips.len(), "clips", false),
+                figure(blocked_posts.len(), "blocked", !blocked_posts.is_empty()),
+            ],
+        },
+        rc::ReportComponent::Bars { series: hourly },
+        rc::ReportComponent::Prose {
+            text: repo_theme_sentence(scope, cards),
+        },
+        rc::ReportComponent::Meters { pairs: repo_pairs },
+        rc::ReportComponent::EvidenceChips {
+            links: cards
+                .iter()
+                .take(6)
+                .map(|card| rc::EvidenceLink {
+                    label: card.id.clone(),
+                    href: powder_card_url(&card.id),
+                })
+                .collect(),
+        },
+        rc::ReportComponent::Callouts {
+            lines: blocked_callouts(blocked_posts),
+        },
+        rc::ReportComponent::Trail {
+            events: activity_trail(posts, cards),
+        },
+    ];
+    if !clips.is_empty() {
+        components.push(rc::ReportComponent::BadgeRow {
+            badges: vec![rc::Badge {
+                label: "clips captured".to_string(),
+                value: Some(clips.len().to_string()),
+                status: Some("report".to_string()),
+            }],
+        });
+    }
+    components.push(rc::ReportComponent::FigCaption {
+        text: format!(
+            "{} - sources: Glass wire, clips, Powder completions - cache horizon {}m",
+            scope.label(),
+            REPORT_CACHE_FRESHNESS_SECONDS / 60
+        ),
+    });
+    components
+}
+
+fn figure(value: usize, label: &str, warn: bool) -> rc::Figure {
+    rc::Figure {
+        value: value.to_string(),
+        label: label.to_string(),
+        warn,
+    }
+}
+
+fn hourly_activity_series(
+    window: &ResolvedWindow,
+    posts: &[ActivityPost],
+    cards: &[PowderCard],
+) -> Vec<rc::SeriesPoint> {
+    let span = (window.end - window.start).max(1);
+    let bucket_count = if span <= 6 * 60 * 60 {
+        6
+    } else if span <= 36 * 60 * 60 {
+        12
+    } else {
+        14
+    };
+    let bucket_size = ((span as f64) / (bucket_count as f64)).ceil() as i64;
+    let mut buckets = vec![0_usize; bucket_count];
+    for ts in posts
+        .iter()
+        .map(|item| item.post.updated_at.max(item.post.created_at))
+        .chain(cards.iter().map(PowderCard::activity_timestamp))
+    {
+        if ts < window.start || ts >= window.end {
+            continue;
+        }
+        let index = ((ts - window.start) / bucket_size).clamp(0, bucket_count as i64 - 1) as usize;
+        buckets[index] += 1;
+    }
+    buckets
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| rc::SeriesPoint {
+            label: bucket_label(window.start + (index as i64 * bucket_size)),
+            value: value as f64,
+        })
+        .collect()
+}
+
+fn repo_meter_pairs(cards: &[PowderCard]) -> Vec<rc::MeterPair> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for card in cards {
+        let repo = card.repo.as_deref().unwrap_or("unscoped").to_string();
+        *counts.entry(repo).or_default() += 1;
+    }
+    let mut pairs = counts.into_iter().collect::<Vec<_>>();
+    pairs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    pairs
+        .into_iter()
+        .take(8)
+        .map(|(label, value)| rc::MeterPair {
+            label,
+            value: value as f64,
+        })
+        .collect()
+}
+
+fn repo_theme_sentence(scope: &ReportScope, cards: &[PowderCard]) -> String {
+    let pairs = repo_meter_pairs(cards);
+    if pairs.is_empty() {
+        return format!(
+            "{} had no completed Powder cards in this window; the report is carried by Glass wire activity.",
+            scope.label()
+        );
+    }
+    let leaders = pairs
+        .iter()
+        .take(3)
+        .map(|pair| format!("{} ({})", pair.label, pair.value as usize))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Completion activity clustered in {leaders}; these meters are computed from completed Powder cards in the selected scope."
+    )
+}
+
+fn blocked_callouts(posts: &[ActivityPost]) -> Vec<rc::StatusLine> {
+    if posts.is_empty() {
+        return vec![rc::StatusLine {
+            status: Some("ok".to_string()),
+            text: "No blocked Glass posts were published in this window.".to_string(),
+            href: None,
+        }];
+    }
+    posts
+        .iter()
+        .take(6)
+        .map(|item| rc::StatusLine {
+            status: Some("warn".to_string()),
+            text: declared_summary(&item.post)
+                .unwrap_or_else(|| format!("{} is blocked", item.post.title)),
+            href: Some(post_url(&item.post)),
+        })
+        .collect()
+}
+
+fn activity_trail(posts: &[ActivityPost], cards: &[PowderCard]) -> Vec<rc::TrailEvent> {
+    let mut events = Vec::new();
+    for item in posts.iter().take(8) {
+        events.push((
+            item.post.updated_at.max(item.post.created_at),
+            rc::TrailEvent {
+                time: format_clock(item.post.updated_at.max(item.post.created_at)),
+                kind: Some(feed_kind_for_post(&item.post).as_str().to_string()),
+                agent: Some(item.session.agent.clone()),
+                title: item.post.title.clone(),
+                href: Some(post_url(&item.post)),
+            },
+        ));
+    }
+    for card in cards.iter().take(8) {
+        events.push((
+            card.activity_timestamp(),
+            rc::TrailEvent {
+                time: format_clock(card.activity_timestamp()),
+                kind: Some("receipt".to_string()),
+                agent: card.repo.clone(),
+                title: format!("{} - {}", card.id, card.title),
+                href: Some(powder_card_url(&card.id)),
+            },
+        ));
+    }
+    events.sort_by_key(|event| std::cmp::Reverse(event.0));
+    events
+        .into_iter()
+        .take(10)
+        .map(|(_, event)| event)
+        .collect()
+}
+
+fn bucket_label(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
 }
 
 async fn generate_fleet_digest(window: &ResolvedWindow) -> Result<GeneratedDoc> {
@@ -886,224 +1103,6 @@ fn generate_review_index(glass: &Glass) -> Result<GeneratedDoc> {
             "reviewCount": review_rows.len(),
             "sample": sample_title,
         }),
-    })
-}
-
-fn activity_hero(
-    scope: &ReportScope,
-    window: &ResolvedWindow,
-    powder_completed: usize,
-    posts: usize,
-    clips: usize,
-    blocked: usize,
-) -> Component {
-    Component::Hero(Hero {
-        title: format!("Activity digest - {}", scope.label()),
-        summary: text(format!(
-            "{}: {powder_completed} completed Powder card(s), {posts} Glass post(s), {clips} clip(s), {blocked} blocked event(s).",
-            window.label
-        )),
-        stats: vec![
-            metric("Completed cards", powder_completed),
-            metric("Glass posts", posts),
-            metric("Clips", clips),
-            metric("Blocked", blocked),
-        ],
-        image_intent: None,
-    })
-}
-
-fn powder_completion_table(cards: &[PowderCard]) -> Component {
-    Component::Table(Table {
-        heading: "Powder completions".to_string(),
-        columns: vec![
-            column("card", "Card", false, true),
-            column("title", "Title", false, false),
-            column("repo", "Repo", false, false),
-            column("priority", "Priority", false, false),
-            column("completed", "Completed", false, false),
-            column("evidence", "Evidence", false, false),
-        ],
-        rows: cards
-            .iter()
-            .map(|card| Row {
-                cells: vec![
-                    text_cell("card", &card.id),
-                    text_cell("title", &card.title),
-                    text_cell("repo", card.repo.as_deref().unwrap_or("-")),
-                    text_cell("priority", card.priority.as_deref().unwrap_or("-")),
-                    text_cell("completed", format_timestamp(card.activity_timestamp())),
-                    link_cell("evidence", "card", powder_card_url(&card.id)),
-                ],
-            })
-            .collect(),
-        empty_note: cards
-            .is_empty()
-            .then(|| "No Powder completions found for this window and scope.".to_string()),
-        demoted_note: None,
-    })
-}
-
-fn agent_activity_sections(posts: Vec<ActivityPost>, clips: Vec<ClipQueueItem>) -> Vec<Component> {
-    let mut by_agent = BTreeMap::<String, AgentBucket>::new();
-    for item in posts {
-        let bucket = by_agent.entry(item.session.agent.clone()).or_default();
-        if feed_kind_for_post(&item.post) == FeedKind::Blocked {
-            bucket.blocked.push(item.clone());
-        }
-        bucket.posts.push(item);
-    }
-    for item in clips {
-        by_agent
-            .entry(item.context.session.agent.clone())
-            .or_default()
-            .clips
-            .push(item);
-    }
-
-    if by_agent.is_empty() {
-        return vec![Component::Table(Table {
-            heading: "Agent activity".to_string(),
-            columns: vec![column("note", "Note", false, true)],
-            rows: vec![],
-            empty_note: Some(
-                "No Glass posts or clips found for this window and scope.".to_string(),
-            ),
-            demoted_note: None,
-        })];
-    }
-
-    by_agent
-        .into_iter()
-        .map(|(agent, bucket)| {
-            let mut children = vec![
-                posts_table(&bucket.posts),
-                clips_table(&bucket.clips),
-                blocked_table(&bucket.blocked),
-            ];
-            children.retain(|component| !table_is_empty(component));
-            Component::Disclosure(Disclosure {
-                heading: format!("Agent: {agent}"),
-                children,
-            })
-        })
-        .collect()
-}
-
-fn posts_table(posts: &[ActivityPost]) -> Component {
-    Component::Table(Table {
-        heading: "Posts".to_string(),
-        columns: vec![
-            column("at", "At", false, false),
-            column("kind", "Kind", false, false),
-            column("title", "Title", false, true),
-            column("summary", "Summary", false, false),
-            column("evidence", "Evidence", false, false),
-        ],
-        rows: posts
-            .iter()
-            .map(|item| {
-                let links = evidence_links_for_post(&item.post);
-                Row {
-                    cells: vec![
-                        text_cell(
-                            "at",
-                            format_timestamp(item.post.updated_at.max(item.post.created_at)),
-                        ),
-                        text_cell("kind", feed_kind_for_post(&item.post).as_str()),
-                        text_cell("title", &item.post.title),
-                        text_cell(
-                            "summary",
-                            declared_summary(&item.post).unwrap_or_else(|| {
-                                format!("{} surface(s)", item.post.surfaces.len())
-                            }),
-                        ),
-                        first_link_cell("evidence", links, post_url(&item.post)),
-                    ],
-                }
-            })
-            .collect(),
-        empty_note: Some("No posts in this window.".to_string()),
-        demoted_note: None,
-    })
-}
-
-fn clips_table(clips: &[ClipQueueItem]) -> Component {
-    Component::Table(Table {
-        heading: "Clips".to_string(),
-        columns: vec![
-            column("at", "At", false, false),
-            column("caption", "Caption", false, true),
-            column("surface", "Surface", false, false),
-            column("evidence", "Evidence", false, false),
-        ],
-        rows: clips
-            .iter()
-            .map(|item| {
-                let surface = item
-                    .context
-                    .surface
-                    .as_ref()
-                    .map(|surface| format!("{} {}", surface.kind, surface.id))
-                    .unwrap_or_else(|| "whole post".to_string());
-                Row {
-                    cells: vec![
-                        text_cell("at", format_timestamp(item.clip.created_at)),
-                        text_cell("caption", &item.draft_caption),
-                        text_cell("surface", surface),
-                        first_link_cell(
-                            "evidence",
-                            item.context
-                                .evidence_links
-                                .iter()
-                                .map(|link| EvidenceLink {
-                                    label: link.label.clone(),
-                                    url: link.url.clone(),
-                                })
-                                .collect(),
-                            post_url(&item.context.post),
-                        ),
-                    ],
-                }
-            })
-            .collect(),
-        empty_note: Some("No clips in this window.".to_string()),
-        demoted_note: None,
-    })
-}
-
-fn blocked_table(posts: &[ActivityPost]) -> Component {
-    Component::Table(Table {
-        heading: "Blocked events".to_string(),
-        columns: vec![
-            column("at", "At", false, false),
-            column("title", "Title", false, true),
-            column("summary", "Summary", false, false),
-            column("evidence", "Evidence", false, false),
-        ],
-        rows: posts
-            .iter()
-            .map(|item| Row {
-                cells: vec![
-                    text_cell(
-                        "at",
-                        format_timestamp(item.post.updated_at.max(item.post.created_at)),
-                    ),
-                    text_cell("title", &item.post.title),
-                    text_cell(
-                        "summary",
-                        declared_summary(&item.post).unwrap_or_else(|| "blocked".to_string()),
-                    ),
-                    first_link_cell(
-                        "evidence",
-                        evidence_links_for_post(&item.post),
-                        post_url(&item.post),
-                    ),
-                ],
-            })
-            .collect(),
-        empty_note: Some("No blocked events in this window.".to_string()),
-        demoted_note: None,
     })
 }
 
@@ -1216,12 +1215,19 @@ async fn fetch_completed_powder_cards(scope: &ReportScope, window: &ResolvedWind
     }
 }
 
-async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> SynthesisFetch {
+async fn fetch_synthesis_components(
+    scope: &ReportScope,
+    window: &ResolvedWindow,
+    posts: &[ActivityPost],
+    clips: &[ClipQueueItem],
+    powder: &PowderFetch,
+) -> SynthesisFetch {
     let Some(endpoint) = std::env::var("GLASS_SYNTHESIS_ENDPOINT")
         .ok()
         .filter(|value| !value.is_empty())
     else {
         return SynthesisFetch {
+            components: None,
             html: None,
             status: "not configured".to_string(),
         };
@@ -1231,6 +1237,8 @@ async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> S
         "since": window.since_rfc3339(),
         "until": window.until_rfc3339(),
         "scope": scope.synthesis_scope(),
+        "contract": "glass.report_components.v1",
+        "context": synthesis_context_bundle(posts, clips, powder),
     });
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -1239,6 +1247,7 @@ async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> S
         Ok(client) => client,
         Err(err) => {
             return SynthesisFetch {
+                components: None,
                 html: None,
                 status: format!("client error: {err}"),
             };
@@ -1248,6 +1257,7 @@ async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> S
         Ok(response) => response,
         Err(err) => {
             return SynthesisFetch {
+                components: None,
                 html: None,
                 status: format!("transport error: {err}"),
             };
@@ -1255,6 +1265,7 @@ async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> S
     };
     if !response.status().is_success() {
         return SynthesisFetch {
+            components: None,
             html: None,
             status: format!("upstream returned {}", response.status()),
         };
@@ -1267,45 +1278,116 @@ async fn fetch_synthesis_html(scope: &ReportScope, window: &ResolvedWindow) -> S
         .to_string();
     let value = if content_type.contains("text/event-stream") {
         match response.text().await {
-            Ok(text) => parse_final_sse_spec(&text),
+            Ok(text) => parse_final_sse_payload(&text),
             Err(err) => Err(format!("read synthesis stream: {err}")),
         }
     } else {
         match response.json::<Value>().await {
-            Ok(value) => Ok(spec_from_synthesis_value(value)),
+            Ok(value) => Ok(payload_from_synthesis_value(value)),
             Err(err) => Err(format!("parse synthesis response: {err}")),
         }
     };
-    let spec = match value {
-        Ok(Some(spec)) => spec,
+    let payload = match value {
+        Ok(Some(payload)) => payload,
         Ok(None) => {
             return SynthesisFetch {
+                components: None,
                 html: None,
-                status: "no full spec in synthesis response".to_string(),
+                status: "no full synthesis payload in response".to_string(),
             };
         }
         Err(err) => {
             return SynthesisFetch {
+                components: None,
                 html: None,
                 status: err,
             };
         }
     };
-    match rep1::render_spec_value(spec) {
-        Ok((html, _)) => SynthesisFetch {
-            html: Some(html),
-            status: "ok".to_string(),
+    match components_from_payload(&payload) {
+        Ok(Some(components)) => SynthesisFetch {
+            components: Some(components),
+            html: None,
+            status: "ok: component-list".to_string(),
+        },
+        Ok(None) => match rep1::render_spec_value(payload) {
+            Ok((html, _)) => SynthesisFetch {
+                components: None,
+                html: Some(html),
+                status: "ok: legacy-retrospec".to_string(),
+            },
+            Err(err) => SynthesisFetch {
+                components: None,
+                html: None,
+                status: format!("render error: {err}"),
+            },
         },
         Err(err) => SynthesisFetch {
+            components: None,
             html: None,
-            status: format!("render error: {err}"),
+            status: err,
         },
     }
 }
 
+fn synthesis_context_bundle(
+    posts: &[ActivityPost],
+    clips: &[ClipQueueItem],
+    powder: &PowderFetch,
+) -> Value {
+    json!({
+        "posts": posts.iter().map(|item| {
+            json!({
+                "id": item.post.id,
+                "title": item.post.title,
+                "agent": item.session.agent,
+                "kind": feed_kind_for_post(&item.post).as_str(),
+                "summary": declared_summary(&item.post),
+                "updatedAt": item.post.updated_at.max(item.post.created_at),
+                "url": post_url(&item.post),
+            })
+        }).collect::<Vec<_>>(),
+        "clips": clips.iter().map(|item| {
+            json!({
+                "caption": item.draft_caption,
+                "agent": item.context.session.agent,
+                "createdAt": item.clip.created_at,
+                "postUrl": post_url(&item.context.post),
+            })
+        }).collect::<Vec<_>>(),
+        "powder": {
+            "status": powder.status,
+            "completed": powder.cards.iter().map(|card| {
+                json!({
+                    "id": card.id,
+                    "title": card.title,
+                    "repo": card.repo,
+                    "priority": card.priority,
+                    "completedAt": card.activity_timestamp(),
+                    "url": powder_card_url(&card.id),
+                })
+            }).collect::<Vec<_>>(),
+        }
+    })
+}
+
+fn components_from_payload(value: &Value) -> Result<Option<Vec<rc::ReportComponent>>, String> {
+    if let Some(components) = value.get("components") {
+        return serde_json::from_value::<Vec<rc::ReportComponent>>(components.clone())
+            .map(Some)
+            .map_err(|err| format!("parse component-list synthesis payload: {err}"));
+    }
+    if value.is_array() {
+        return serde_json::from_value::<Vec<rc::ReportComponent>>(value.clone())
+            .map(Some)
+            .map_err(|err| format!("parse component-list synthesis payload: {err}"));
+    }
+    Ok(None)
+}
+
 fn resolve_window(value: &Value) -> Result<ResolvedWindow> {
     match value {
-        Value::Null => resolve_preset("last-week"),
+        Value::Null => resolve_preset("past-24h"),
         Value::String(preset) => resolve_preset(preset),
         Value::Object(object) => {
             let preset = object
@@ -1313,7 +1395,7 @@ fn resolve_window(value: &Value) -> Result<ResolvedWindow> {
                 .or_else(|| object.get("type"))
                 .or_else(|| object.get("kind"))
                 .and_then(Value::as_str)
-                .unwrap_or("last-week");
+                .unwrap_or("past-24h");
             if preset == "custom" {
                 let start = object
                     .get("start")
@@ -1335,6 +1417,17 @@ fn resolve_window(value: &Value) -> Result<ResolvedWindow> {
 }
 
 fn resolve_preset(preset: &str) -> Result<ResolvedWindow> {
+    match preset {
+        "past-hour" | "hour" | "1h" => return resolve_relative_preset("past-hour", 60 * 60),
+        "past-24h" | "24h" | "day" => return resolve_relative_preset("past-24h", 24 * 60 * 60),
+        "past-week" | "week" | "7d" => {
+            return resolve_relative_preset("past-week", 7 * 24 * 60 * 60);
+        }
+        "past-month" | "month" | "30d" => {
+            return resolve_relative_preset("past-month", 30 * 24 * 60 * 60);
+        }
+        _ => {}
+    }
     let today = Local::now().date_naive();
     let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
     let (start_date, end_date) = match preset {
@@ -1345,6 +1438,36 @@ fn resolve_preset(preset: &str) -> Result<ResolvedWindow> {
         other => bail!("unknown window preset: {other}"),
     };
     build_window(preset, start_date, end_date)
+}
+
+fn resolve_relative_preset(preset: &str, seconds: i64) -> Result<ResolvedWindow> {
+    let now = Utc::now().timestamp();
+    let end = round_up_timestamp(now, REPORT_CACHE_FRESHNESS_SECONDS);
+    let start = end - seconds;
+    Ok(ResolvedWindow {
+        preset: preset.to_string(),
+        start,
+        end,
+        label: match preset {
+            "past-hour" => "past hour".to_string(),
+            "past-24h" => "past 24h".to_string(),
+            "past-week" => "past week".to_string(),
+            "past-month" => "past month".to_string(),
+            _ => preset.to_string(),
+        },
+    })
+}
+
+fn round_up_timestamp(ts: i64, bucket: i64) -> i64 {
+    if bucket <= 0 {
+        return ts;
+    }
+    let remainder = ts.rem_euclid(bucket);
+    if remainder == 0 {
+        ts
+    } else {
+        ts + bucket - remainder
+    }
 }
 
 fn resolve_custom_window(start: &str, end: &str) -> Result<ResolvedWindow> {
@@ -1404,7 +1527,7 @@ fn render_component_list(components: &[Component]) -> Result<String> {
     Ok(html)
 }
 
-fn parse_final_sse_spec(text: &str) -> Result<Option<Value>, String> {
+fn parse_final_sse_payload(text: &str) -> Result<Option<Value>, String> {
     let mut event = "message".to_string();
     let mut data = Vec::<String>::new();
     let mut full = None;
@@ -1413,7 +1536,7 @@ fn parse_final_sse_spec(text: &str) -> Result<Option<Value>, String> {
             if event == "full" && !data.is_empty() {
                 let value = serde_json::from_str::<Value>(&data.join("\n"))
                     .map_err(|err| format!("parse full synthesis event: {err}"))?;
-                full = spec_from_synthesis_value(value);
+                full = payload_from_synthesis_value(value);
             }
             event = "message".to_string();
             data.clear();
@@ -1433,35 +1556,27 @@ fn parse_final_sse_spec(text: &str) -> Result<Option<Value>, String> {
     if event == "full" && !data.is_empty() {
         let value = serde_json::from_str::<Value>(&data.join("\n"))
             .map_err(|err| format!("parse full synthesis event: {err}"))?;
-        full = spec_from_synthesis_value(value);
+        full = payload_from_synthesis_value(value);
     }
     Ok(full)
 }
 
-fn spec_from_synthesis_value(value: Value) -> Option<Value> {
-    value.get("spec").cloned().or_else(|| {
-        if value.get("stage").is_some() {
-            None
-        } else {
-            Some(value)
-        }
-    })
-}
-
-fn table_is_empty(component: &Component) -> bool {
-    matches!(component, Component::Table(table) if table.rows.is_empty())
+fn payload_from_synthesis_value(value: Value) -> Option<Value> {
+    if let Some(components) = value.get("components") {
+        return Some(json!({ "components": components }));
+    }
+    if let Some(spec) = value.get("spec") {
+        return Some(spec.clone());
+    }
+    if value.get("stage").is_some() {
+        return None;
+    }
+    Some(value)
 }
 
 impl PowderCard {
     fn activity_timestamp(&self) -> i64 {
         self.completed_at.or(self.updated_at).unwrap_or_default()
-    }
-}
-
-fn metric(label: &str, value: usize) -> Metric {
-    Metric {
-        label: label.to_string(),
-        value: value.to_string(),
     }
 }
 
@@ -1489,14 +1604,6 @@ fn link_cell(key: &str, text: impl Into<String>, href: impl Into<String>) -> Cel
             href: href.into(),
         },
     }
-}
-
-fn first_link_cell(key: &str, links: Vec<EvidenceLink>, fallback: String) -> Cell {
-    let link = links.into_iter().next().unwrap_or(EvidenceLink {
-        label: "post".to_string(),
-        url: fallback,
-    });
-    link_cell(key, link.label, link.url)
 }
 
 fn text(s: impl Into<String>) -> Vec<InlineNode> {
@@ -1559,10 +1666,34 @@ fn format_timestamp(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
+fn format_generated_clock(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn format_clock(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn cache_note(ts: i64, cached: bool) -> String {
+    if cached {
+        format!("cached · generated {}", format_generated_clock(ts))
+    } else {
+        format!("generated {}", format_generated_clock(ts))
+    }
+}
+
 fn timestamp_rfc3339(ts: i64) -> String {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().expect("unix epoch"))
         .to_rfc3339()
+}
+
+fn reports_styles() -> String {
+    format!("{}{}", rc::STYLE, REPORTS_STYLE)
 }
 
 fn redirect_301(location: &str) -> Response {
@@ -1599,33 +1730,35 @@ fn html_escape(raw: &str) -> String {
 }
 
 const REPORTS_STYLE: &str = r#"
-.reports-shell { max-width: 1040px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-.reports-generator { margin-bottom: var(--ae-space-6); border-bottom: 1px solid var(--ae-line); padding-bottom: var(--ae-space-6); }
-.reports-gen-row { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr) minmax(12rem, auto); gap: var(--ae-space-3); align-items: center; margin-top: var(--ae-space-4); }
-.reports-chipset { display: flex; flex-wrap: wrap; gap: var(--ae-space-2); }
-.reports-chip { border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); padding: 0.55rem 0.8rem; font: inherit; cursor: pointer; }
-.reports-chip.is-on { background: var(--ae-ink); border-color: var(--ae-ink); color: var(--ae-surface); }
-.reports-range { justify-self: end; color: var(--ae-ink-muted); white-space: nowrap; }
-.reports-custom { display: none; grid-template-columns: repeat(2, minmax(12rem, 1fr)); gap: var(--ae-space-3); margin-top: var(--ae-space-3); margin-left: 6.5rem; }
+.reports-shell { max-width: 1040px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); display: grid; gap: var(--ae-space-6); }
+.reports-ask { border-bottom: 1px solid var(--ae-line); padding-bottom: var(--ae-space-5); }
+.reports-sentence { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.5em; margin: 0.4em 0 0; font-weight: var(--ae-w-medium); }
+.reports-slot { appearance: none; border: 0; border-bottom: 1px dashed var(--ae-ink-muted); border-radius: 0; background: transparent; color: var(--ae-ink); font: inherit; font-weight: var(--ae-w-medium); padding: 0 1.2em 0 0.1em; cursor: pointer; }
+.reports-slot:hover, .reports-slot:focus { border-bottom-color: var(--ae-ink); outline: none; }
+.reports-scope-value { display: none; width: min(16rem, 100%); }
+.reports-scope-value.is-on { display: inline-block; }
+.reports-custom { display: none; grid-template-columns: repeat(2, minmax(12rem, 1fr)); gap: var(--ae-space-3); margin-top: var(--ae-space-4); }
 .reports-custom.is-on { display: grid; }
 .reports-custom label { display: grid; gap: 0.35rem; color: var(--ae-ink-muted); font-size: 13px; }
-.reports-scope-value { display: none; width: 100%; min-width: 12rem; }
-.reports-scope-value.is-on { display: block; }
-.reports-status { margin-left: var(--ae-space-3); color: var(--ae-ink-muted); font-size: 13px; }
-.reports-library { overflow: hidden; }
-.reports-table-scroll { overflow-x: auto; }
+.reports-cache-line { min-height: 1.4em; margin: var(--ae-space-3) 0 0; display: flex; align-items: baseline; gap: 0.75em; flex-wrap: wrap; font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--ae-ink-faint); }
+.reports-regenerate { border: 0; border-bottom: 1px dashed var(--ae-ink-muted); background: transparent; color: var(--ae-ink-muted); font: inherit; letter-spacing: inherit; padding: 0; cursor: pointer; }
+.reports-regenerate:hover { color: var(--ae-ink); border-bottom-color: var(--ae-ink); }
+.reports-result:empty { min-height: 10rem; border: 1px dashed var(--ae-line); }
 .reports-doc { max-width: 980px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
+.reports-inline-doc { margin: 0; padding-inline: 0; }
 .reports-doc-head { border-bottom: 1px solid var(--ae-line); margin-bottom: var(--ae-space-5); padding-bottom: var(--ae-space-5); }
 .reports-doc-head h1 { font-size: clamp(1.5rem, 2.5vw, 2.4rem); line-height: 1.05; margin: 0.2rem 0 var(--ae-space-4); }
 .reports-doc-head dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ae-space-3); margin: 0; }
 .reports-doc-head dt { color: var(--ae-ink-muted); font-size: 11px; letter-spacing: 0; }
 .reports-doc-head dd { margin: 0.2rem 0 0; font-family: var(--ae-font-mono); font-size: 13px; }
+.reports-inline-headline { display: flex; align-items: baseline; justify-content: space-between; gap: var(--ae-space-4); flex-wrap: wrap; }
+.reports-cache-note { font-family: var(--ae-font-mono); font-size: 11px; letter-spacing: 0.06em; color: var(--ae-ink-faint); }
 .reports-doc-body { display: grid; gap: var(--ae-space-5); }
 .reports-synthesis { display: grid; gap: var(--ae-space-3); padding: var(--ae-space-4); border: 1px solid var(--ae-line); }
 @media (max-width: 720px) {
-  .reports-gen-row { grid-template-columns: 1fr; }
-  .reports-range { justify-self: start; }
-  .reports-custom { margin-left: 0; grid-template-columns: 1fr; }
+  .reports-sentence { align-items: stretch; }
+  .reports-slot, .reports-scope-value { max-width: 100%; }
+  .reports-custom { grid-template-columns: 1fr; }
   .reports-doc-head dl { grid-template-columns: 1fr; }
 }
 "#;
@@ -1635,7 +1768,7 @@ const REPORTS_SCRIPT: &str = r#"
   var root = document.querySelector('.reports-shell');
   if (!root) return;
   var state = {
-    window: 'last-week',
+    window: 'past-24h',
     scope: 'fleet',
     scopeValue: '',
     kind: root.dataset.initialKind || 'activity-digest'
@@ -1646,74 +1779,52 @@ const REPORTS_SCRIPT: &str = r#"
     state.scope = parts[0];
     state.scopeValue = parts.slice(1).join(':');
   }
-  var rangeEl = document.getElementById('reports-range');
+  var scopeEl = document.getElementById('reports-scope');
+  var windowEl = document.getElementById('reports-window');
   var customEl = document.getElementById('reports-custom');
   var startEl = document.getElementById('reports-start');
   var endEl = document.getElementById('reports-end');
   var scopeValueEl = document.getElementById('reports-scope-value');
   var statusEl = document.getElementById('reports-status');
-  var generateEl = document.getElementById('reports-generate');
+  var runEl = document.getElementById('reports-run');
+  var regenerateEl = document.getElementById('reports-regenerate');
+  var resultEl = document.getElementById('reports-result');
 
   function pad(n) { return String(n).padStart(2, '0'); }
   function isoDate(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
   function addDays(d, n) { var x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; }
-  function monday(d) {
-    var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    var day = (x.getDay() + 6) % 7;
-    x.setDate(x.getDate() - day);
-    return x;
-  }
-  function rangeForPreset(name) {
+  function defaultRange() {
     var today = new Date();
     today = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    var week = monday(today);
-    if (name === 'today') return [today, addDays(today, 1)];
-    if (name === 'yesterday') return [addDays(today, -1), today];
-    if (name === 'this-week') return [week, addDays(week, 7)];
-    if (name === 'last-week') return [addDays(week, -7), week];
-    return [startEl.valueAsDate || today, endEl.valueAsDate || addDays(today, 1)];
-  }
-  function setActive(group, attr, value) {
-    document.querySelectorAll('[data-report-group="' + group + '"] .reports-chip').forEach(function(btn){
-      btn.classList.toggle('is-on', btn.getAttribute(attr) === value);
-    });
+    return [addDays(today, -1), today];
   }
   function sync() {
     if (state.kind === 'backlog' && state.scope !== 'repo') {
       state.scope = 'repo';
       if (!state.scopeValue) state.scopeValue = 'glass';
     }
-    setActive('window', 'data-window', state.window);
-    setActive('scope', 'data-scope', state.scope);
-    setActive('kind', 'data-kind', state.kind);
+    scopeEl.value = state.scope;
+    windowEl.value = state.window;
     customEl.classList.toggle('is-on', state.window === 'custom');
     scopeValueEl.classList.toggle('is-on', state.scope !== 'fleet');
     scopeValueEl.placeholder = state.scope === 'agent' ? 'agent name' : 'repo name';
     if (state.scope !== 'fleet') scopeValueEl.value = state.scopeValue;
-    var range = rangeForPreset(state.window);
-    rangeEl.textContent = isoDate(range[0]) + ' -> ' + isoDate(range[1]);
+    var range = defaultRange();
     if (!startEl.value) startEl.value = isoDate(range[0]);
     if (!endEl.value) endEl.value = isoDate(range[1]);
   }
-  document.querySelectorAll('[data-window]').forEach(function(btn){
-    btn.addEventListener('click', function(){ state.window = btn.dataset.window; sync(); });
-  });
-  document.querySelectorAll('[data-scope]').forEach(function(btn){
-    btn.addEventListener('click', function(){ state.scope = btn.dataset.scope; sync(); });
-  });
-  document.querySelectorAll('[data-kind]').forEach(function(btn){
-    btn.addEventListener('click', function(){ state.kind = btn.dataset.kind; sync(); });
-  });
+  scopeEl.addEventListener('change', function(){ state.scope = scopeEl.value; sync(); });
+  windowEl.addEventListener('change', function(){ state.window = windowEl.value; sync(); });
   scopeValueEl.addEventListener('input', function(){ state.scopeValue = scopeValueEl.value.trim(); });
-  startEl.addEventListener('input', sync);
-  endEl.addEventListener('input', sync);
-  generateEl.addEventListener('click', async function(){
-    statusEl.textContent = 'Generating...';
-    generateEl.disabled = true;
+  async function run(force) {
+    statusEl.textContent = force ? 'regenerating...' : 'running...';
+    runEl.disabled = true;
+    regenerateEl.hidden = true;
     state.scopeValue = scopeValueEl.value.trim();
     var payload = {
       kind: state.kind,
       requestedBy: 'you',
+      regenerate: !!force,
       scope: state.scope === 'fleet' ? { type: 'fleet' } : { type: state.scope, value: state.scopeValue },
       window: state.window === 'custom'
         ? { type: 'custom', start: startEl.value, end: endEl.value }
@@ -1727,12 +1838,31 @@ const REPORTS_SCRIPT: &str = r#"
       });
       var body = await response.json();
       if (!response.ok) throw new Error(body.error || 'report generation failed');
-      window.location.href = body.url;
+      resultEl.innerHTML = body.html || '';
+      statusEl.textContent = body.cacheNote || '';
+      regenerateEl.hidden = !body.id;
     } catch (err) {
       statusEl.textContent = err.message || String(err);
-      generateEl.disabled = false;
+    } finally {
+      runEl.disabled = false;
     }
-  });
+  }
+  runEl.addEventListener('click', function(){ run(false); });
+  regenerateEl.addEventListener('click', function(){ run(true); });
+  startEl.addEventListener('input', sync);
+  endEl.addEventListener('input', sync);
+  if (initialScope.indexOf(':') === -1 && initialScope !== 'fleet') {
+    state.scope = initialScope;
+  }
+  if (state.scope !== 'fleet' && !state.scopeValue) {
+    state.scopeValue = state.scope === 'repo' ? 'glass' : '';
+  }
+  try {
+    var url = new URL(window.location.href);
+    var win = url.searchParams.get('window');
+    if (win) state.window = win;
+  } catch (e) {
+  }
   sync();
 })();
 "#;
