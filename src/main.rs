@@ -98,6 +98,7 @@ async fn serve(args: Vec<String>) -> Result<()> {
         })
         .with_context(|| format!("bind {addr}"))?;
     glass::canary::start_health_loop();
+    glass::start_standing_digest_scheduler(glass.clone());
     println!("glass listening on http://{addr} with db {db}");
     axum::serve(listener, app_router(glass))
         .await
