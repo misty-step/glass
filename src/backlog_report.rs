@@ -23,6 +23,8 @@ use glance_catalog::{Component, InlineNode, RenderContext, render_component};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::{needs_you, sanctum_url, shell};
+
 /// A card counts as stale if untouched for this long -- long enough that a
 /// card genuinely being worked wouldn't trip it, short enough to surface
 /// backlog rot the operator asked to see without manually sifting tickets.
@@ -327,43 +329,15 @@ pub async fn backlog_report(AxumPath(repo): AxumPath<String>) -> impl IntoRespon
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-const BACKLOG_SHELL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass — Backlog</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  }
-} catch (e) {}
-</script>
-<style>
+const BACKLOG_STYLE: &str = r#"
 .backlog-shell { max-width: 880px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
 .backlog-form { display: flex; gap: var(--ae-space-3); margin-bottom: var(--ae-space-6); }
 .backlog-form input { flex: 1; padding: var(--ae-space-3); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); font-family: var(--ae-font-mono); }
 .backlog-form button { padding: var(--ae-space-3) var(--ae-space-5); border: 1px solid var(--ae-ink); background: var(--ae-ink); color: var(--ae-surface); cursor: pointer; }
 .backlog-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <p class="ae-h">Report</p>
-    <a href="/rep1">Fleet report</a>
-    <a href="/backlog/glass" id="backlog-nav-active">Backlog</a>
-    <a href="/">Raw live feed</a>
-  </aside>
-  <main class="ae-desk">
+"#;
+
+const BACKLOG_BODY: &str = r#"
     <div class="backlog-shell">
       <form class="backlog-form" id="backlog-form">
         <input type="text" id="backlog-repo" value="{{REPO}}" placeholder="repo name (e.g. glass)">
@@ -371,9 +345,9 @@ try {
       </form>
       <div id="backlog-body"><p class="backlog-loading">Loading&hellip;</p></div>
     </div>
-  </main>
-</div>
-<script>
+"#;
+
+const BACKLOG_SCRIPT: &str = r#"
 (function(){
   var bodyEl = document.getElementById('backlog-body');
   var formEl = document.getElementById('backlog-form');
@@ -412,13 +386,19 @@ try {
 
   load(inputEl.value.trim());
 })();
-</script>
-</body>
-</html>"#;
+"#;
 
 pub async fn backlog_shell(AxumPath(repo): AxumPath<String>) -> impl IntoResponse {
-    let html = BACKLOG_SHELL.replace("{{REPO}}", &repo);
-    axum::response::Html(html)
+    let body = BACKLOG_BODY.replace("{{REPO}}", &repo);
+    axum::response::Html(shell::render_shell(shell::Shell {
+        title: "Glass - Backlog",
+        active: None,
+        needs_you_count: needs_you::awaiting_input_count().await,
+        sanctum_url: &sanctum_url(),
+        styles: BACKLOG_STYLE,
+        body: &body,
+        scripts: BACKLOG_SCRIPT,
+    }))
 }
 
 #[cfg(test)]

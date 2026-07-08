@@ -21,6 +21,44 @@ const cards = [
   },
 ];
 
+const now = Math.floor(Date.now() / 1000);
+const awaiting = [
+  {
+    card: {
+      id: "glass-931",
+      title: "Redesign 1/6 - the shell",
+      repo: "glass",
+      priority: "p1",
+    },
+    question: {
+      payload: "DECIDE: keep the rail active on viewer drill-downs?",
+      created_at: now - 120,
+    },
+    run: {
+      id: "run-shell",
+      agent: "glass-931-codex",
+      created_at: now - 240,
+    },
+  },
+  {
+    card: {
+      id: "glass-933",
+      title: "Reports home",
+      repo: "glass",
+      priority: "p2",
+    },
+    question: {
+      payload: "ACT: confirm reports URL flip",
+      created_at: now - 600,
+    },
+    run: {
+      id: "run-reports",
+      agent: "glass-933-codex",
+      created_at: now - 900,
+    },
+  },
+];
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   if (url.pathname === "/health") {
@@ -31,6 +69,11 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/v1/cards") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ cards }));
+    return;
+  }
+  if (url.pathname === "/api/v1/runs/awaiting-input") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ awaiting }));
     return;
   }
   res.writeHead(404, { "content-type": "application/json" });

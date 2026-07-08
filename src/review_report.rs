@@ -14,6 +14,8 @@ use glance_catalog::{
     Component, InlineNode, REPORT, RenderContext, render_component, validate_layout,
 };
 
+use crate::{needs_you, sanctum_url, shell};
+
 #[derive(Debug, Clone)]
 struct ReviewReport {
     id: &'static str,
@@ -79,18 +81,30 @@ struct GateClaim {
 }
 
 pub async fn review_sample_shell() -> Response {
-    match render_review_shell(&sample_review()) {
+    let needs_you_count = needs_you::awaiting_input_count().await;
+    match render_review_shell(&sample_review(), needs_you_count) {
         Ok(html) => Html(html).into_response(),
         Err(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
     }
 }
 
-fn render_review_shell(report: &ReviewReport) -> Result<String, String> {
+fn render_review_shell(
+    report: &ReviewReport,
+    needs_you_count: Option<usize>,
+) -> Result<String, String> {
     let body = render_report_body(report)?;
-    Ok(REVIEW_SHELL
-        .replace("{{TITLE}}", &html_escape(report.title))
+    let body = REVIEW_BODY
         .replace("{{BODY}}", &body)
-        .replace("{{REVIEW_ID}}", &html_escape(report.id)))
+        .replace("{{REVIEW_ID}}", &html_escape(report.id));
+    Ok(shell::render_shell(shell::Shell {
+        title: report.title,
+        active: None,
+        needs_you_count,
+        sanctum_url: &sanctum_url(),
+        styles: REVIEW_STYLE,
+        body: &body,
+        scripts: "",
+    }))
 }
 
 fn render_report_body(report: &ReviewReport) -> Result<String, String> {
@@ -590,53 +604,20 @@ new file mode 100644
 +}
 "#;
 
-const REVIEW_SHELL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass - {{TITLE}}</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  }
-} catch (e) {}
-</script>
-<style>
+const REVIEW_STYLE: &str = r#"
 .review-shell { max-width: 920px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
 .review-status { margin: 0 0 var(--ae-space-5); padding: var(--ae-space-3) var(--ae-space-4); border: 1px solid var(--ae-line); color: var(--ae-ink-muted); font-size: 13px; }
 .review-status b { color: var(--ae-ink); }
 .review-body { display: grid; gap: var(--ae-space-5); }
 .review-body .ae-disclosure { margin-top: var(--ae-space-2); }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <p class="ae-h">Report</p>
-    <a href="/review/sample" aria-current="page">Review</a>
-    <a href="/rep1">Fleet report</a>
-    <a href="/backlog/glass">Backlog</a>
-    <a href="/needs-you">Needs You</a>
-    <a href="/">Raw live feed</a>
-  </aside>
-  <main class="ae-desk">
+"#;
+
+const REVIEW_BODY: &str = r#"
     <div class="review-shell" data-review-id="{{REVIEW_ID}}">
       <p class="review-status" data-reviewer-sanity="pass"><b>Reviewer sanity check:</b> passed. This is a read-only surface; approve, merge, or reply elsewhere.</p>
       <div class="review-body">{{BODY}}</div>
     </div>
-  </main>
-</div>
-</body>
-</html>"#;
+"#;
 
 #[cfg(test)]
 mod tests {

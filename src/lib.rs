@@ -31,6 +31,7 @@ pub mod canary;
 mod needs_you;
 mod rep1;
 mod review_report;
+mod shell;
 mod window_report;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1200,7 +1201,15 @@ pub fn app_router(glass: Glass) -> Router {
 }
 
 async fn viewer() -> Html<String> {
-    Html(VIEWER_HTML.replace("{{SANCTUM_URL}}", &escape_html(&sanctum_url())))
+    Html(shell::render_shell(shell::Shell {
+        title: "Glass",
+        active: Some(shell::Place::Now),
+        needs_you_count: needs_you::awaiting_input_count().await,
+        sanctum_url: &sanctum_url(),
+        styles: VIEWER_STYLE,
+        body: VIEWER_BODY,
+        scripts: VIEWER_SCRIPT,
+    }))
 }
 
 /// The cross-repo "back to Sanctum" link (glass-915): config-driven via
@@ -1208,7 +1217,7 @@ async fn viewer() -> Html<String> {
 /// forks of this public repo don't inherit a link into the origin
 /// deployment's infrastructure. Deployments that sit behind a Sanctum portal
 /// set the env var to the portal root; unset, the link is inert (`/`).
-fn sanctum_url() -> String {
+pub(crate) fn sanctum_url() -> String {
     sanctum_url_from(std::env::var("GLASS_SANCTUM_URL").ok())
 }
 
@@ -1323,7 +1332,15 @@ async fn list_clips(
 async fn clips_page(State(glass): State<Glass>) -> Result<Html<String>, ApiError> {
     let clips = glass.list_clip_queue(50)?;
     let body = render_clip_queue_body(&clips)?;
-    Ok(Html(CLIPS_SHELL.replace("{{BODY}}", &body)))
+    Ok(Html(shell::render_shell(shell::Shell {
+        title: "Glass - Clips",
+        active: Some(shell::Place::Clips),
+        needs_you_count: needs_you::awaiting_input_count().await,
+        sanctum_url: &sanctum_url(),
+        styles: CLIPS_STYLE,
+        body: &CLIPS_BODY.replace("{{BODY}}", &body),
+        scripts: "",
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2290,45 +2307,11 @@ fn escape_html(raw: &str) -> String {
 
 const SANDBOX_CSP: &str = "sandbox allow-scripts allow-forms allow-popups; default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src https: data: blob:; media-src https: data: blob:";
 
-const CLIPS_SHELL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass — Clips</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  }
-} catch (e) {}
-</script>
-<style>
+const CLIPS_STYLE: &str = r#"
 .clips-shell { max-width: 960px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <p class="ae-h">Review</p>
-    <a href="/clips" aria-current="page">Clips</a>
-    <a href="/rep1">Fleet report</a>
-    <a href="/backlog/glass">Backlog</a>
-    <a href="/">Raw live feed</a>
-  </aside>
-  <main class="ae-desk">
-    <div class="clips-shell">{{BODY}}</div>
-  </main>
-</div>
-</body>
-</html>"#;
+"#;
+
+const CLIPS_BODY: &str = r#"<div class="clips-shell">{{BODY}}</div>"#;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -2590,25 +2573,7 @@ async fn verify_surface_contract(client: &reqwest::Client, base_url: &str) -> Re
 
 const AESTHETIC_CSS: &str = include_str!("../assets/aesthetic.css");
 
-const VIEWER_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glass</title>
-<link rel="stylesheet" href="/aesthetic.css">
-<script>
-try {
-  var m = localStorage.getItem('ae-mode');
-  if (m === 'dark' || m === 'light') {
-    document.documentElement.classList.add(m);
-    document.documentElement.style.colorScheme = m;
-  } else {
-    document.documentElement.style.colorScheme = 'light dark';
-  }
-} catch (e) {}
-</script>
-<style>
+const VIEWER_STYLE: &str = r#"
 .glass-wall { margin-bottom: var(--ae-space-7); }
 .glass-wall:empty { display: none; }
 .glass-dead { margin: 0 0 var(--ae-space-7); }
@@ -2648,138 +2613,29 @@ try {
 .glass-metric-label { color: var(--ae-ink-muted); }
 .glass-empty { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
 .glass-desk-header { margin-bottom: var(--ae-space-6); }
-#rail-agents { display: grid; gap: var(--ae-space-2); }
 #feed-dialog { max-width: 720px; width: min(92vw, 720px); }
 @media (max-width: 48rem) {
   .glass-surface iframe { min-height: 200px; }
   .glass-feed-main { padding: var(--ae-space-4); }
   .glass-feed-links { padding: 0 var(--ae-space-4) var(--ae-space-4); }
-  /* The kit's own .ae-rail mobile rule expects rail links as its direct
-     children so its row flex lays them out edge to edge; #rail-agents
-     wraps Glass's dynamic agent list in one div for the renderer, so it
-     needs the same row treatment or its children fall back to block
-     stacking and the bottom chrome grows tall instead of staying a slim,
-     horizontally-scrollable bar. */
-  #rail-agents { display: flex; flex-direction: row; gap: var(--ae-space-5); }
 }
-</style>
-</head>
-<body>
-<div class="ae-shell">
-  <aside class="ae-rail">
-    <a class="ae-logo ae-logo-compact" href="/">
-      <span class="ae-app-mark"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 6 8 9"></path><path d="m16 7-8 8"></path><rect x="4" y="2" width="16" height="20"></rect></svg></span>
-      <span class="ae-name">Glass</span>
-    </a>
-    <a data-sanctum-home href="{{SANCTUM_URL}}" aria-label="Back to Sanctum" title="Back to Sanctum"><svg class="ae-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"></path><path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg> Sanctum</a>
-    <p class="ae-h">Agents</p>
-    <a href="/" id="rail-all">Ambient feed</a>
-    <div id="rail-agents"></div>
-    <p class="ae-h">Review</p>
-    <a href="/clips">Clips</a>
-    <div class="ae-rail-foot">
-      <button class="ae-mode" aria-label="toggle color mode">
-        <svg class="ae-icon ae-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
-        <svg class="ae-icon ae-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>
-      </button>
-    </div>
-  </aside>
-  <main class="ae-desk">
+"#;
+
+const VIEWER_BODY: &str = r#"
     <div id="desk-header" class="glass-desk-header"></div>
     <section id="feed" class="glass-feed" aria-label="Ambient evidence feed"></section>
     <section id="wall" class="ae-wall glass-wall" aria-label="Live sessions"></section>
     <details id="dead" class="glass-dead" hidden></details>
     <section id="posts" aria-label="Status feed"><p class="glass-empty">No live surfaces yet.</p></section>
-  </main>
-</div>
 <dialog id="feed-dialog" class="ae-dialog">
   <div id="feed-dialog-body"></div>
   <div class="ae-dialog-acts">
     <button type="button" class="ae-button ae-button-quiet ae-button-compact" data-feed-close>Close</button>
   </div>
 </dialog>
-<script>
-/* the mode recipe (Misty Step Aesthetic kit), with Glass's e2e-visible
-   system/dark/light cycle pinned on the same .ae-mode affordance. */
-(() => {
-  const root = document.documentElement;
-  const modes = ['system', 'dark', 'light'];
-  let activeTransition = null;
-  let easingTimer = 0;
-  let runId = 0;
-  let targetMode = null;
-  const storedMode = () => {
-    try {
-      const mode = localStorage.getItem('ae-mode');
-      return modes.includes(mode) ? mode : 'system';
-    } catch (e) {
-      return 'system';
-    }
-  };
-  const currentMode = () => targetMode || root.dataset.mode || storedMode();
-  const reducedMode = matchMedia('(prefers-reduced-motion: reduce)');
-  const clearAnimation = () => {
-    if (activeTransition && activeTransition.skipTransition) activeTransition.skipTransition();
-    activeTransition = null;
-    if (easingTimer) { clearTimeout(easingTimer); easingTimer = 0; }
-    root.classList.remove('ae-vt-mode', 'ae-mode-easing');
-  };
-  const updateButtons = (mode) => {
-    document.querySelectorAll('.ae-mode').forEach((btn) => {
-      btn.dataset.mode = mode;
-      btn.setAttribute('aria-label', `color mode: ${mode}`);
-      btn.setAttribute('title', `Color mode: ${mode}`);
-    });
-  };
-  const applyMode = (mode) => {
-    root.classList.toggle('dark', mode === 'dark');
-    root.classList.toggle('light', mode === 'light');
-    root.style.colorScheme = mode === 'system' ? 'light dark' : mode;
-    root.dataset.mode = mode;
-    try { localStorage.setItem('ae-mode', mode); } catch (e) {}
-    updateButtons(mode);
-  };
-  applyMode(storedMode());
-  document.querySelectorAll('.ae-mode').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const mode = currentMode();
-      const nextMode = modes[(modes.indexOf(mode) + 1) % modes.length];
-      const id = ++runId;
-      targetMode = nextMode;
-      const flip = () => { if (id !== runId) return; applyMode(nextMode); };
-      clearAnimation();
-      if (reducedMode.matches) {
-        flip();
-        targetMode = null;
-      } else if (document.startViewTransition) {
-        root.classList.add('ae-vt-mode');
-        activeTransition = document.startViewTransition(flip);
-        easingTimer = setTimeout(() => {
-          if (id !== runId) return;
-          root.classList.remove('ae-vt-mode');
-          easingTimer = 0;
-        }, 180);
-        activeTransition.finished.finally(() => {
-          if (id !== runId) return;
-          root.classList.remove('ae-vt-mode');
-          activeTransition = null;
-          targetMode = null;
-          if (easingTimer) { clearTimeout(easingTimer); easingTimer = 0; }
-        });
-      } else {
-        root.classList.add('ae-mode-easing');
-        flip();
-        easingTimer = setTimeout(() => {
-          if (id !== runId) return;
-          root.classList.remove('ae-mode-easing');
-          easingTimer = 0;
-          targetMode = null;
-        }, 180);
-      }
-    });
-  });
-})();
+"#;
 
+const VIEWER_SCRIPT: &str = r#"
 /* Glass status-feed app. Every running agent gets its own view at
    /agent/:agent; /session/:id keeps the single-session drill-down. Both
    are real navigations (no client router) so the URL is always shareable. */
@@ -2968,14 +2824,6 @@ function renderDeskHeader() {
   }
 }
 
-function renderRail(agents) {
-  const railAll = document.getElementById('rail-all');
-  if (!view.agent && !view.session) railAll.setAttribute('aria-current', 'page');
-  else railAll.removeAttribute('aria-current');
-  const host = document.getElementById('rail-agents');
-  host.innerHTML = agents.map(agent => `<a href="/agent/${encodeURIComponent(agent.agent)}" ${view.agent === agent.agent ? 'aria-current="page"' : ''}><span class="ae-chip ae-cat-${catFor(agent.agent)}">${esc(agent.agent)}</span></a>`).join('');
-}
-
 /* Dead sessions (no post in LIVE_WINDOW_SECONDS) are demoted out of the
    primary wall into a collapsed archive; they never render as peers of
    live work. */
@@ -3016,7 +2864,6 @@ function renderWall(sessions, posts) {
 function render(data) {
   currentSessions = new Map((data.sessions || []).map(session => [session.id, session]));
   renderDeskHeader();
-  renderRail(data.agents || []);
   renderWall(data.sessions || [], data.posts || []);
   const feedHost = document.getElementById('feed');
   const postsHost = document.getElementById('posts');
@@ -3040,6 +2887,4 @@ async function load() {
 }
 load();
 setInterval(load, 1500);
-</script>
-</body>
-</html>"#;
+"#;
