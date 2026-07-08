@@ -575,10 +575,10 @@ const LIB_ROUTE_DIFF: &str = r#"diff --git a/src/lib.rs b/src/lib.rs
 +mod review_report;
  mod window_report;
 @@
-         .route("/rep1", get(rep1::rep1_shell))
+         .route("/rep1", get(reports::redirect_rep1))
          .route("/api/rep1/{window}", get(rep1::rep1_report))
 +        .route("/review/sample", get(review_report::review_sample_shell))
-         .route("/backlog/{repo}", get(backlog_report::backlog_shell))
+         .route("/backlog/{repo}", get(reports::redirect_backlog))
 "#;
 
 const REVIEW_MODULE_DIFF: &str = r#"diff --git a/src/review_report.rs b/src/review_report.rs

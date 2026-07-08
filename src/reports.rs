@@ -11,6 +11,8 @@ use glance_catalog::structural::{Cell, CellValue, ColumnSpec, Disclosure, Hero, 
 use glance_catalog::{Component, InlineNode, RenderContext, render_component};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration as StdDuration;
+use tracing::{info, warn};
 
 use crate::{
     ApiError, ClipQueueItem, EvidenceLink, FeedKind, Glass, Post, Session, backlog_report,
@@ -257,6 +259,40 @@ struct GeneratedDoc {
     meta_json: Value,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum StandingDigestCadence {
+    Daily,
+    Weekly,
+}
+
+impl StandingDigestCadence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+        }
+    }
+
+    fn title_prefix(self) -> &'static str {
+        match self {
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StandingDigestDue {
+    run_at: DateTime<Local>,
+    cadences: Vec<StandingDigestCadence>,
+}
+
+#[derive(Debug)]
+enum StandingDigestOutcome {
+    Created(Box<ReportRecord>),
+    Skipped(Box<ReportRecord>),
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct PowderCardsResponse {
     #[serde(default)]
@@ -352,6 +388,17 @@ pub(crate) async fn post_report(
     Ok(Json(json!({ "id": report.id, "url": report.url() })))
 }
 
+pub(crate) fn start_standing_digest_scheduler(glass: Glass) {
+    tokio::spawn(async move {
+        loop {
+            let due = next_standing_digest_due_after(Local::now());
+            let sleep_for = duration_until(due.run_at);
+            tokio::time::sleep(sleep_for).await;
+            run_due_standing_digests(&glass, &due).await;
+        }
+    });
+}
+
 pub(crate) async fn redirect_rep1() -> Response {
     redirect_301("/reports?kind=fleet-digest")
 }
@@ -399,6 +446,162 @@ async fn generate_and_persist(glass: &Glass, input: GenerateReportRequest) -> Re
         meta_json: generated.meta_json,
         requested_by,
     })
+}
+
+async fn run_due_standing_digests(glass: &Glass, due: &StandingDigestDue) {
+    for cadence in &due.cadences {
+        match generate_standing_digest_once(glass, *cadence, due.run_at).await {
+            Ok(StandingDigestOutcome::Created(report)) => info!(
+                cadence = cadence.as_str(),
+                report_id = report.id.as_str(),
+                window_start = report.window_start,
+                window_end = report.window_end,
+                "generated standing Glass digest"
+            ),
+            Ok(StandingDigestOutcome::Skipped(report)) => info!(
+                cadence = cadence.as_str(),
+                report_id = report.id.as_str(),
+                window_start = report.window_start,
+                window_end = report.window_end,
+                "skipped standing Glass digest because the window already exists"
+            ),
+            Err(error) => warn!(
+                cadence = cadence.as_str(),
+                scheduled_run_at = due.run_at.to_rfc3339(),
+                error = %error,
+                "skipped standing Glass digest after generation error"
+            ),
+        }
+    }
+}
+
+async fn generate_standing_digest_once(
+    glass: &Glass,
+    cadence: StandingDigestCadence,
+    run_at: DateTime<Local>,
+) -> Result<StandingDigestOutcome> {
+    let window = standing_digest_window(cadence, run_at)?;
+    if let Some(report) = existing_activity_digest(glass, &window)? {
+        return Ok(StandingDigestOutcome::Skipped(Box::new(report)));
+    }
+
+    let scope = ReportScope::fleet();
+    let mut generated = generate_activity_digest(glass, &scope, &window).await?;
+    generated.title = format!(
+        "{} activity digest - {}",
+        cadence.title_prefix(),
+        scope.label()
+    );
+    attach_standing_digest_meta(&mut generated.meta_json, cadence, run_at);
+    let report = glass.create_report(NewReport {
+        kind: ReportKind::ActivityDigest.as_str().to_string(),
+        scope_type: scope.scope_type,
+        scope_value: scope.scope_value,
+        window_start: Some(window.start),
+        window_end: Some(window.end),
+        title: generated.title,
+        doc_html: generated.doc_html,
+        meta_json: generated.meta_json,
+        requested_by: "glass-standing-digest".to_string(),
+    })?;
+    Ok(StandingDigestOutcome::Created(Box::new(report)))
+}
+
+fn existing_activity_digest(
+    glass: &Glass,
+    window: &ResolvedWindow,
+) -> Result<Option<ReportRecord>> {
+    glass.find_activity_digest_report(window.start, window.end)
+}
+
+fn attach_standing_digest_meta(
+    meta_json: &mut Value,
+    cadence: StandingDigestCadence,
+    run_at: DateTime<Local>,
+) {
+    let marker = json!({
+        "cadence": cadence.as_str(),
+        "scheduledRunAt": run_at.with_timezone(&Utc).to_rfc3339(),
+        "localScheduledRunAt": run_at.to_rfc3339(),
+    });
+    if let Value::Object(object) = meta_json {
+        object.insert("standingDigest".to_string(), marker);
+    } else {
+        let source = std::mem::take(meta_json);
+        *meta_json = json!({
+            "standingDigest": marker,
+            "source": source,
+        });
+    }
+}
+
+fn next_standing_digest_due_after(now: DateTime<Local>) -> StandingDigestDue {
+    let daily = next_daily_run_after(now);
+    let weekly = next_weekly_run_after(now);
+    let run_at = if daily <= weekly { daily } else { weekly };
+    let mut cadences = Vec::new();
+    if daily == run_at {
+        cadences.push(StandingDigestCadence::Daily);
+    }
+    if weekly == run_at {
+        cadences.push(StandingDigestCadence::Weekly);
+    }
+    StandingDigestDue { run_at, cadences }
+}
+
+fn next_daily_run_after(now: DateTime<Local>) -> DateTime<Local> {
+    let today = now.date_naive();
+    let today_six = local_time(today, 6, 0, 0);
+    if now < today_six {
+        today_six
+    } else {
+        local_time(today + Duration::days(1), 6, 0, 0)
+    }
+}
+
+fn next_weekly_run_after(now: DateTime<Local>) -> DateTime<Local> {
+    let today = now.date_naive();
+    let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let this_monday_six = local_time(this_monday, 6, 0, 0);
+    if now < this_monday_six {
+        this_monday_six
+    } else {
+        local_time(this_monday + Duration::days(7), 6, 0, 0)
+    }
+}
+
+fn standing_digest_window(
+    cadence: StandingDigestCadence,
+    run_at: DateTime<Local>,
+) -> Result<ResolvedWindow> {
+    let run_date = run_at.date_naive();
+    match cadence {
+        StandingDigestCadence::Daily => {
+            build_window("standing-daily", run_date - Duration::days(1), run_date)
+        }
+        StandingDigestCadence::Weekly => {
+            let week_end =
+                run_date - Duration::days(run_date.weekday().num_days_from_monday() as i64);
+            build_window("standing-weekly", week_end - Duration::days(7), week_end)
+        }
+    }
+}
+
+fn local_time(date: NaiveDate, hour: u32, minute: u32, second: u32) -> DateTime<Local> {
+    let naive = date
+        .and_hms_opt(hour, minute, second)
+        .expect("scheduler uses valid wall-clock components");
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| Local.from_local_datetime(&naive).latest())
+        .expect("scheduler local wall-clock time must resolve")
+}
+
+fn duration_until(run_at: DateTime<Local>) -> StdDuration {
+    (run_at.with_timezone(&Utc) - Utc::now())
+        .to_std()
+        .unwrap_or_else(|_| StdDuration::from_secs(0))
 }
 
 fn report_summary(report: &ReportRecord) -> Value {
@@ -1537,17 +1740,29 @@ const REPORTS_SCRIPT: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn reports_persist_across_reopen() {
-        let path = std::env::temp_dir().join(format!(
-            "glass-report-test-{}.db",
+    fn temp_db_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}.db",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
-        ));
+        ))
+    }
+
+    fn local_dt(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("test datetime must exist in local timezone")
+    }
+
+    #[test]
+    fn reports_persist_across_reopen() {
+        let path = temp_db_path("glass-report-test");
         {
             let glass = Glass::open(&path).expect("open test db");
             let created = glass
@@ -1572,6 +1787,88 @@ mod tests {
             assert_eq!(loaded.doc_html, "<p>persisted</p>");
             assert_eq!(loaded.meta_json, json!({"test": true}));
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn standing_digest_next_run_math_uses_local_six_am_boundaries() {
+        let before_daily = local_dt(2026, 7, 8, 5, 30);
+        let next_daily = next_daily_run_after(before_daily);
+        assert_eq!(next_daily.date_naive(), before_daily.date_naive());
+        assert_eq!(next_daily.hour(), 6);
+        assert_eq!(next_daily.minute(), 0);
+
+        let after_daily = local_dt(2026, 7, 8, 6, 1);
+        let next_daily = next_daily_run_after(after_daily);
+        assert_eq!(
+            next_daily.date_naive(),
+            after_daily.date_naive() + Duration::days(1)
+        );
+        assert_eq!(next_daily.hour(), 6);
+
+        let monday_before = local_dt(2026, 7, 13, 5, 59);
+        let next_weekly = next_weekly_run_after(monday_before);
+        assert_eq!(next_weekly.date_naive(), monday_before.date_naive());
+        assert_eq!(next_weekly.weekday().num_days_from_monday(), 0);
+        assert_eq!(next_weekly.hour(), 6);
+
+        let monday_after = local_dt(2026, 7, 13, 6, 1);
+        let next_weekly = next_weekly_run_after(monday_after);
+        assert_eq!(
+            next_weekly.date_naive(),
+            monday_after.date_naive() + Duration::days(7)
+        );
+        assert_eq!(next_weekly.weekday().num_days_from_monday(), 0);
+
+        let due = next_standing_digest_due_after(local_dt(2026, 7, 13, 5, 59));
+        assert_eq!(
+            due.cadences,
+            vec![StandingDigestCadence::Daily, StandingDigestCadence::Weekly]
+        );
+    }
+
+    #[test]
+    fn standing_digest_windows_cover_previous_day_and_previous_week() {
+        let run_at = local_dt(2026, 7, 8, 6, 0);
+        let daily =
+            standing_digest_window(StandingDigestCadence::Daily, run_at).expect("daily window");
+        assert_eq!(daily.preset, "standing-daily");
+        assert_eq!(daily.label, "2026-07-07 - 2026-07-08");
+
+        let run_at = local_dt(2026, 7, 13, 6, 0);
+        let weekly =
+            standing_digest_window(StandingDigestCadence::Weekly, run_at).expect("weekly window");
+        assert_eq!(weekly.preset, "standing-weekly");
+        assert_eq!(weekly.label, "2026-07-06 - 2026-07-13");
+    }
+
+    #[tokio::test]
+    async fn standing_digest_generation_skips_an_existing_window_in_the_real_store() {
+        let path = temp_db_path("glass-standing-digest-test");
+        let glass = Glass::open(&path).expect("open test db");
+        let run_at = local_dt(2026, 7, 8, 6, 0);
+
+        let first = generate_standing_digest_once(&glass, StandingDigestCadence::Daily, run_at)
+            .await
+            .expect("first digest");
+        let StandingDigestOutcome::Created(first_report) = first else {
+            panic!("first digest should create a report");
+        };
+        assert_eq!(first_report.id, "R-001");
+        assert_eq!(first_report.title, "Daily activity digest - fleet");
+        assert_eq!(first_report.meta_json["standingDigest"]["cadence"], "daily");
+
+        let second = generate_standing_digest_once(&glass, StandingDigestCadence::Daily, run_at)
+            .await
+            .expect("second digest");
+        let StandingDigestOutcome::Skipped(existing_report) = second else {
+            panic!("second digest should skip the existing window");
+        };
+        assert_eq!(existing_report.id, "R-001");
+
+        let reports = glass.list_reports().expect("list reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].requested_by, "glass-standing-digest");
         let _ = std::fs::remove_file(path);
     }
 

@@ -515,6 +515,15 @@ impl Glass {
         store.list_reports()
     }
 
+    pub(crate) fn find_activity_digest_report(
+        &self,
+        window_start: i64,
+        window_end: i64,
+    ) -> Result<Option<reports::ReportRecord>> {
+        let store = self.lock()?;
+        store.find_activity_digest_report(window_start, window_end)
+    }
+
     pub(crate) fn list_activity_posts(
         &self,
         start: i64,
@@ -968,6 +977,29 @@ impl Store {
         Ok(reports)
     }
 
+    fn find_activity_digest_report(
+        &self,
+        window_start: i64,
+        window_end: i64,
+    ) -> Result<Option<reports::ReportRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, kind, scope_type, scope_value, window_start, window_end, title, doc_html, meta_json, generated_at, requested_by
+                 FROM reports
+                 WHERE kind = 'activity-digest'
+                   AND scope_type = 'fleet'
+                   AND scope_value IS NULL
+                   AND window_start = ?1
+                   AND window_end = ?2
+                 ORDER BY generated_at DESC, id DESC
+                 LIMIT 1",
+                params![window_start, window_end],
+                row_to_report,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn list_activity_posts(&self, start: i64, end: i64) -> Result<Vec<reports::ActivityPost>> {
         let mut stmt = self.conn.prepare(
             "SELECT
@@ -1388,6 +1420,10 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/api/needs-you/answer", post(needs_you::answer))
         .with_state(glass)
         .layer(CatchPanicLayer::custom(canary::panic_response))
+}
+
+pub fn start_standing_digest_scheduler(glass: Glass) {
+    reports::start_standing_digest_scheduler(glass);
 }
 
 async fn viewer() -> Html<String> {
@@ -3114,7 +3150,7 @@ through sandboxed /s/:post_id?part=N documents. JSON, trace, image, and
 metric are rendered as data by the trusted viewer; metric is a label+value
 chip (`{"kind":"metric","label":"tests","value":"42 passed"}`).
 
-The ambient feed reads optional `feedKind`, `summary`, `detail`, and
+The Wire under Now reads optional `feedKind`, `summary`, `detail`, and
 `evidenceLinks` fields from posted surface JSON. `feedKind` must be one of
 shipped, report, blocked, question, note, digest, release, or receipt.
 
@@ -3630,10 +3666,10 @@ function renderPosts(host, posts) {
 function renderDeskHeader() {
   const host = document.getElementById('desk-header');
   if (view.agent) {
-    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Ambient feed</a></p><h2 class="ae-h">${esc(view.agent)}</h2>`;
+    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Now</a></p><h2 class="ae-h">${esc(view.agent)}</h2>`;
   } else if (view.session) {
     const session = currentSessions.get(view.session);
-    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Ambient feed</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
+    host.innerHTML = `<p class="ae-chrome"><a href="/">&larr; Now</a></p><h2 class="ae-h">${esc(session ? session.title : view.session)}</h2>`;
   } else {
     host.innerHTML = '';
   }
