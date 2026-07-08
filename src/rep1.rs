@@ -29,63 +29,18 @@ use glance_catalog::structural::{Disclosure, Hero, Narrative, Timeline, Timeline
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{needs_you, sanctum_url, shell};
-
 /// The four windows the operator's lab-3 design locked. Only the two
 /// fleet-retro actually schedules resolve to real data today.
 struct WindowTab {
     id: &'static str,
-    label: &'static str,
-    live: bool,
 }
 
 const WINDOW_TABS: [WindowTab; 4] = [
-    WindowTab {
-        id: "30m",
-        label: "30m",
-        live: false,
-    },
-    WindowTab {
-        id: "1h",
-        label: "1h",
-        live: false,
-    },
-    WindowTab {
-        id: "24h",
-        label: "24h",
-        live: true,
-    },
-    WindowTab {
-        id: "7d",
-        label: "7d",
-        live: true,
-    },
+    WindowTab { id: "30m" },
+    WindowTab { id: "1h" },
+    WindowTab { id: "24h" },
+    WindowTab { id: "7d" },
 ];
-
-/// Renders the tab bar server-side from `WINDOW_TABS` -- the single source
-/// of truth for tab id/label/live-state, so the client never carries its
-/// own duplicate copy that could drift.
-fn render_tabs_html(active: &str) -> String {
-    WINDOW_TABS
-        .iter()
-        .map(|tab| {
-            let classes = if tab.id == active {
-                "rep1-tab active"
-            } else {
-                "rep1-tab"
-            };
-            let disabled = if tab.live {
-                String::new()
-            } else {
-                r#" disabled title="needs glass-919 on-demand synthesis""#.to_string()
-            };
-            format!(
-                r#"<button class="{classes}" data-win="{}"{disabled}>{}</button>"#,
-                tab.id, tab.label
-            )
-        })
-        .collect()
-}
 
 /// Maps REP-1's lab-locked window ids to the shelf slugs fleet-retro
 /// actually publishes under (glass-917: `daily`/`weekly`, not `24h`/`7d`).
@@ -269,6 +224,26 @@ fn render_all(raw: &RawSpec) -> Result<String, String> {
     Ok(html)
 }
 
+pub(crate) fn render_spec_value(spec_json: serde_json::Value) -> Result<(String, String), String> {
+    let raw = serde_json::from_value::<RawSpec>(spec_json)
+        .map_err(|err| format!("could not parse fleet-retro spec: {err}"))?;
+    let generated_at = raw.generated_at.clone();
+    render_all(&raw).map(|html| (html, generated_at))
+}
+
+pub(crate) async fn generate_rep1_html(window: &str) -> Result<(String, String), String> {
+    let Some(tab) = WINDOW_TABS.iter().find(|tab| tab.id == window) else {
+        return Err(format!("unknown REP-1 window: {window}"));
+    };
+    let Some(shelf_window) = shelf_window_for(tab.id) else {
+        return Err(format!(
+            "{window} needs glass-919's on-demand synthesis service; only 24h/7d are live today"
+        ));
+    };
+    let (_, spec_json) = crate::window_report::fetch_window(shelf_window, "fleet").await;
+    render_spec_value(spec_json?)
+}
+
 /// `GET /api/rep1/{window}` (window = one of `WINDOW_TABS`). Streams an
 /// instant `skeleton` event, then a `full` event whose `html` field is
 /// pre-rendered by `glance_catalog::render` -- the client only injects it,
@@ -306,23 +281,22 @@ pub async fn rep1_report(
 
         let (is_hit, outcome) = crate::window_report::fetch_window(shelf_window, "fleet").await;
         match outcome {
-            Ok(spec_json) => match serde_json::from_value::<RawSpec>(spec_json) {
-                Ok(raw) => match render_all(&raw) {
-                    Ok(html) => {
+            Ok(spec_json) => match render_spec_value(spec_json) {
+                Ok((html, generated_at)) => {
                         yield Ok::<_, Infallible>(
                             Event::default().event("full").data(
                                 json!({
                                     "stage": "full",
                                     "window": window,
                                     "cache": if is_hit { "hit" } else { "miss" },
-                                    "generated_at": raw.generated_at,
+                                    "generated_at": generated_at,
                                     "html": html,
                                 })
                                 .to_string(),
                             ),
                         );
                     }
-                    Err(err) => {
+                Err(err) => {
                         crate::canary::report_error(
                             "glass.rep1.render.failed",
                             "route=/api/rep1/{window} error_kind=render",
@@ -333,23 +307,6 @@ pub async fn rep1_report(
                             ),
                         );
                     }
-                },
-                Err(err) => {
-                    crate::canary::report_error(
-                        "glass.rep1.parse.failed",
-                        "route=/api/rep1/{window} upstream=fleet-retro-shelf error_kind=parse",
-                    );
-                    yield Ok::<_, Infallible>(
-                        Event::default().event("error").data(
-                            json!({
-                                "stage": "error",
-                                "window": window,
-                                "message": format!("could not parse fleet-retro spec: {err}"),
-                            })
-                            .to_string(),
-                        ),
-                    );
-                }
             },
             Err(message) => {
                 yield Ok::<_, Infallible>(
@@ -362,87 +319,6 @@ pub async fn rep1_report(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-const REP1_STYLE: &str = r#"
-.rep1-shell { max-width: 720px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-.rep1-tabs { display: flex; gap: var(--ae-space-2); margin-bottom: var(--ae-space-5); flex-wrap: wrap; }
-.rep1-tab { padding: var(--ae-space-2) var(--ae-space-4); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); font-family: var(--ae-font-mono); font-size: 13px; cursor: pointer; }
-.rep1-tab.active { background: var(--ae-ink); color: var(--ae-surface); }
-.rep1-tab:disabled { opacity: 0.4; cursor: not-allowed; }
-.rep1-sub { color: var(--ae-ink-muted); font-size: 13px; margin-bottom: var(--ae-space-5); }
-.rep1-raw-link { display: inline-block; margin-top: var(--ae-space-6); font-size: 13px; }
-.rep1-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-"#;
-
-const REP1_BODY: &str = r#"
-    <div class="rep1-shell">
-      <div class="rep1-tabs" id="rep1-tabs">{{TABS_HTML}}</div>
-      <p class="rep1-sub" id="rep1-sub">Synthesized from the fleet-retro pack (git, Powder, bb, feed, receipts, moments) + canary + landmark.</p>
-      <div id="rep1-body"><p class="rep1-loading">Loading&hellip;</p></div>
-      <a class="rep1-raw-link" href="/">View raw per-agent feed &rarr;</a>
-    </div>
-"#;
-
-const REP1_SCRIPT: &str = r#"
-(function(){
-  // The tab bar is server-rendered from WINDOW_TABS (single source of
-  // truth for id/label/live-state) -- this script only wires clicks and
-  // toggles the active class, it never duplicates the tab list.
-  var tabsEl = document.getElementById('rep1-tabs');
-  var bodyEl = document.getElementById('rep1-body');
-
-  function wireTabs() {
-    Array.prototype.forEach.call(tabsEl.querySelectorAll('.rep1-tab'), function(btn){
-      btn.addEventListener('click', function(){
-        if (btn.disabled) return;
-        Array.prototype.forEach.call(tabsEl.querySelectorAll('.rep1-tab'), function(other){
-          other.classList.remove('active');
-        });
-        btn.classList.add('active');
-        load(btn.getAttribute('data-win'));
-      });
-    });
-  }
-
-  function load(win) {
-    bodyEl.innerHTML = '<p class="rep1-loading">Loading&hellip;</p>';
-    var es = new EventSource('/api/rep1/' + win);
-    es.addEventListener('skeleton', function(){
-      bodyEl.innerHTML = '<p class="rep1-loading">Synthesizing&hellip;</p>';
-    });
-    es.addEventListener('full', function(ev){
-      var data = JSON.parse(ev.data);
-      bodyEl.innerHTML = data.html;
-      es.close();
-    });
-    es.addEventListener('error', function(ev){
-      try {
-        var data = JSON.parse(ev.data);
-        bodyEl.innerHTML = '<p class="rep1-loading">' + data.message + '</p>';
-      } catch (e) {
-        bodyEl.innerHTML = '<p class="rep1-loading">Report unavailable.</p>';
-      }
-      es.close();
-    });
-  }
-
-  wireTabs();
-  load('24h');
-})();
-"#;
-
-pub async fn rep1_shell() -> impl IntoResponse {
-    let body = REP1_BODY.replace("{{TABS_HTML}}", &render_tabs_html("24h"));
-    axum::response::Html(shell::render_shell(shell::Shell {
-        title: "Glass - Fleet report",
-        active: Some(shell::Place::Reports),
-        needs_you_count: needs_you::awaiting_input_count().await,
-        sanctum_url: &sanctum_url(),
-        styles: REP1_STYLE,
-        body: &body,
-        scripts: REP1_SCRIPT,
-    }))
 }
 
 #[cfg(test)]
@@ -587,14 +463,5 @@ mod tests {
         assert_eq!(shelf_window_for("7d"), Some("weekly"));
         assert_eq!(shelf_window_for("30m"), None);
         assert_eq!(shelf_window_for("1h"), None);
-    }
-
-    #[test]
-    fn render_tabs_html_marks_the_active_tab_and_disables_non_live_windows() {
-        let html = render_tabs_html("24h");
-        assert!(html.contains(r#"data-win="30m" disabled"#));
-        assert!(html.contains(r#"data-win="1h" disabled"#));
-        assert!(html.contains(r#"class="rep1-tab active" data-win="24h">"#));
-        assert!(html.contains(r#"class="rep1-tab" data-win="7d">"#));
     }
 }

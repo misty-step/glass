@@ -30,6 +30,7 @@ mod backlog_report;
 pub mod canary;
 mod needs_you;
 mod rep1;
+mod reports;
 mod review_report;
 mod shell;
 mod window_report;
@@ -499,6 +500,35 @@ impl Glass {
         store.list_clip_queue(limit)
     }
 
+    pub(crate) fn create_report(&self, input: reports::NewReport) -> Result<reports::ReportRecord> {
+        let mut store = self.lock()?;
+        store.create_report(input)
+    }
+
+    pub(crate) fn get_report(&self, id: &str) -> Result<reports::ReportRecord> {
+        let store = self.lock()?;
+        store.get_report(id)
+    }
+
+    pub(crate) fn list_reports(&self) -> Result<Vec<reports::ReportRecord>> {
+        let store = self.lock()?;
+        store.list_reports()
+    }
+
+    pub(crate) fn list_activity_posts(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<reports::ActivityPost>> {
+        let store = self.lock()?;
+        store.list_activity_posts(start, end)
+    }
+
+    pub(crate) fn list_activity_clips(&self, start: i64, end: i64) -> Result<Vec<ClipQueueItem>> {
+        let store = self.lock()?;
+        store.list_activity_clips(start, end)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let store = self.lock()?;
         store.list_sessions()
@@ -582,6 +612,21 @@ impl Store {
               ON clips(created_at DESC);
             CREATE INDEX IF NOT EXISTS clips_session_idx
               ON clips(session_id, post_id);
+            CREATE TABLE IF NOT EXISTS reports (
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              scope_type TEXT NOT NULL,
+              scope_value TEXT,
+              window_start INTEGER,
+              window_end INTEGER,
+              title TEXT NOT NULL,
+              doc_html TEXT NOT NULL,
+              meta_json TEXT NOT NULL,
+              generated_at INTEGER NOT NULL,
+              requested_by TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS reports_generated_at_idx
+              ON reports(generated_at DESC, id DESC);
             "#,
         )?;
         // Glass is ONE-WAY as of glass-912: the comment/feedback surface and
@@ -847,6 +892,127 @@ impl Store {
             .collect()
     }
 
+    fn create_report(&mut self, input: reports::NewReport) -> Result<reports::ReportRecord> {
+        if input.kind.trim().is_empty() {
+            bail!("report kind is required");
+        }
+        if input.scope_type.trim().is_empty() {
+            bail!("report scope_type is required");
+        }
+        if input.title.trim().is_empty() {
+            bail!("report title is required");
+        }
+        if input.doc_html.trim().is_empty() {
+            bail!("report doc_html is required");
+        }
+        let generated_at = now_seconds();
+        let mut next = self.next_report_counter()?;
+        loop {
+            let id = format!("R-{next:03}");
+            let inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO reports
+                 (id, kind, scope_type, scope_value, window_start, window_end, title, doc_html, meta_json, generated_at, requested_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    id,
+                    &input.kind,
+                    &input.scope_type,
+                    &input.scope_value,
+                    &input.window_start,
+                    &input.window_end,
+                    &input.title,
+                    &input.doc_html,
+                    serde_json::to_string(&input.meta_json)?,
+                    generated_at,
+                    &input.requested_by,
+                ],
+            )?;
+            if inserted == 1 {
+                return self.get_report(&id);
+            }
+            next += 1;
+        }
+    }
+
+    fn next_report_counter(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1
+                 FROM reports WHERE id GLOB 'R-[0-9]*'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn get_report(&self, id: &str) -> Result<reports::ReportRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, kind, scope_type, scope_value, window_start, window_end, title, doc_html, meta_json, generated_at, requested_by
+                 FROM reports WHERE id = ?1",
+                [id],
+                row_to_report,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("report not found: {id}"))
+    }
+
+    fn list_reports(&self) -> Result<Vec<reports::ReportRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, scope_type, scope_value, window_start, window_end, title, doc_html, meta_json, generated_at, requested_by
+             FROM reports ORDER BY generated_at DESC, id DESC LIMIT 500",
+        )?;
+        let reports = stmt
+            .query_map([], row_to_report)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(reports)
+    }
+
+    fn list_activity_posts(&self, start: i64, end: i64) -> Result<Vec<reports::ActivityPost>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+               p.id, p.session_id, p.title, p.surfaces_json, p.created_at, p.updated_at, p.version, p.history_json,
+               s.id, s.agent, s.title, s.cwd, s.created_at, s.last_active_at
+             FROM posts p
+             JOIN sessions s ON s.id = p.session_id
+             WHERE MAX(p.created_at, p.updated_at) >= ?1
+               AND MAX(p.created_at, p.updated_at) < ?2
+             ORDER BY MAX(p.created_at, p.updated_at) DESC, p.id DESC",
+        )?;
+        let posts = stmt
+            .query_map(params![start, end], |row| {
+                Ok(reports::ActivityPost {
+                    post: row_to_post(row)?,
+                    session: Session {
+                        id: row.get(8)?,
+                        agent: row.get(9)?,
+                        title: row.get(10)?,
+                        cwd: row.get(11)?,
+                        created_at: row.get(12)?,
+                        last_active_at: row.get(13)?,
+                    },
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(posts)
+    }
+
+    fn list_activity_clips(&self, start: i64, end: i64) -> Result<Vec<ClipQueueItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, post_id, post_version, surface_id, surface_index, range_json, note, caption, created_at
+             FROM clips
+             WHERE created_at >= ?1 AND created_at < ?2
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let clips = stmt
+            .query_map(params![start, end], row_to_clip)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        clips
+            .into_iter()
+            .map(|clip| self.clip_queue_item(clip))
+            .collect()
+    }
+
     fn clip_queue_item(&self, clip: Clip) -> Result<ClipQueueItem> {
         let session = self.get_session(&clip.session_id)?;
         let post = self.get_post(&clip.post_id)?;
@@ -1023,6 +1189,23 @@ fn row_to_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
     })
 }
 
+fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<reports::ReportRecord> {
+    let meta_json: String = row.get(8)?;
+    Ok(reports::ReportRecord {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        scope_type: row.get(2)?,
+        scope_value: row.get(3)?,
+        window_start: row.get(4)?,
+        window_end: row.get(5)?,
+        title: row.get(6)?,
+        doc_html: row.get(7)?,
+        meta_json: serde_json::from_str(&meta_json).map_err(json_error_to_sql)?,
+        generated_at: row.get(9)?,
+        requested_by: row.get(10)?,
+    })
+}
+
 fn json_error_to_sql(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
@@ -1171,6 +1354,8 @@ pub fn app_router(glass: Glass) -> Router {
         .route("/session/{session_id}/p/{post_id}", get(viewer))
         .route("/agent/{agent}", get(viewer))
         .route("/clips", get(clips_page))
+        .route("/reports", get(reports::reports_shell))
+        .route("/reports/{id}", get(reports::report_doc_shell))
         .route("/setup", get(setup))
         .route("/agent-howto", get(agent_howto))
         .route("/api/surface-kinds", get(surface_kinds))
@@ -1189,10 +1374,14 @@ pub fn app_router(glass: Glass) -> Router {
             "/api/window-report/{window}",
             get(window_report::window_report),
         )
-        .route("/rep1", get(rep1::rep1_shell))
+        .route(
+            "/api/reports",
+            get(reports::list_reports).post(reports::post_report),
+        )
+        .route("/rep1", get(reports::redirect_rep1))
         .route("/api/rep1/{window}", get(rep1::rep1_report))
         .route("/review/sample", get(review_report::review_sample_shell))
-        .route("/backlog/{repo}", get(backlog_report::backlog_shell))
+        .route("/backlog/{repo}", get(reports::redirect_backlog))
         .route("/api/backlog/{repo}", get(backlog_report::backlog_report))
         .route("/needs-you", get(needs_you::needs_you_shell))
         .route("/api/needs-you", get(needs_you::needs_you_report))
@@ -2231,7 +2420,7 @@ fn post_feed_event(post: &Post, session: Option<&Session>) -> FeedEvent {
     }
 }
 
-fn feed_kind_for_post(post: &Post) -> FeedKind {
+pub(crate) fn feed_kind_for_post(post: &Post) -> FeedKind {
     post.surfaces
         .iter()
         .find_map(feed_kind_from_surface)
@@ -2246,7 +2435,7 @@ fn feed_kind_from_surface(surface: &Surface) -> Option<FeedKind> {
         .and_then(|raw| FeedKind::from_str(raw).ok())
 }
 
-fn declared_summary(post: &Post) -> Option<String> {
+pub(crate) fn declared_summary(post: &Post) -> Option<String> {
     post.surfaces.iter().find_map(|surface| {
         string_field(&surface.fields, &["summary", "feedSummary", "feed_summary"])
             .or_else(|| nested_string_field(&surface.fields, "data", &["summary", "feedSummary"]))
@@ -2266,7 +2455,7 @@ fn declared_detail(post: &Post) -> Option<String> {
     })
 }
 
-fn evidence_links_for_post(post: &Post) -> Vec<EvidenceLink> {
+pub(crate) fn evidence_links_for_post(post: &Post) -> Vec<EvidenceLink> {
     let mut links = Vec::new();
     for surface in &post.surfaces {
         links.extend(evidence_links_from_surface(surface));

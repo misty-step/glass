@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
 use axum::{Json as AxumJson, Router};
+use chrono::{Duration as ChronoDuration, Local};
 use glass::{
     DoctorConfig, Glass, NewSession, PublishPost, SURFACE_KINDS, Surface, SurfaceKind, app_router,
     run_doctor,
@@ -31,8 +32,8 @@ fn assert_shared_rail(html: &str, active_href: Option<&str>) {
         "when Powder is unavailable, the needs-you place must degrade to no count: {html}"
     );
     assert!(
-        html.contains(r#"<a href="/rep1">Reports</a>"#)
-            || html.contains(r#"<a href="/rep1" aria-current="page">Reports</a>"#)
+        html.contains(r#"<a href="/reports">Reports</a>"#)
+            || html.contains(r#"<a href="/reports" aria-current="page">Reports</a>"#)
     );
     assert!(
         html.contains(r#"<a href="/clips">Clips</a>"#)
@@ -987,23 +988,41 @@ async fn window_report_streams_a_skeleton_before_the_shelf_fetch_resolves() {
 }
 
 #[tokio::test]
-async fn rep1_shell_serves_a_server_rendered_tab_bar_with_two_disabled_tabs() {
+async fn reports_shell_serves_the_generator_and_empty_library() {
     let response = app_router(Glass::memory().expect("memory store"))
-        .oneshot(Request::builder().uri("/rep1").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/reports")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert_shared_rail(&html, Some("/rep1"));
+    assert_shared_rail(&html, Some("/reports"));
+    assert!(html.contains("GENERATE A REPORT"));
+    assert!(html.contains("Activity digest"));
+    assert!(html.contains("PLATE 1 - THE LIBRARY"));
+    assert!(html.contains("No generated reports yet."));
+}
+
+#[tokio::test]
+async fn rep1_human_route_redirects_to_reports_generator() {
+    let response = app_router(Glass::memory().expect("memory store"))
+        .oneshot(Request::builder().uri("/rep1").body(Body::empty()).unwrap())
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
     assert!(
-        !html.contains("{{TABS_HTML}}"),
-        "the tab-bar placeholder must be substituted server-side"
-    );
-    assert!(html.contains(r#"data-win="24h""#) && html.contains(r#"data-win="7d""#));
-    assert!(
-        html.contains(r#"data-win="30m" disabled"#) && html.contains(r#"data-win="1h" disabled"#),
-        "30m/1h need glass-919's on-demand synthesis and must render visibly disabled: {html}"
+        location.starts_with("/reports"),
+        "legacy /rep1 should fold into the reports page: {location}"
     );
 }
 
@@ -1044,7 +1063,7 @@ async fn rep1_report_streams_a_glass_919_pending_error_for_non_live_windows() {
 }
 
 #[tokio::test]
-async fn backlog_shell_echoes_the_requested_repo_into_the_form_input() {
+async fn backlog_human_route_redirects_to_reports_generator_with_repo_scope() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
             Request::builder()
@@ -1054,12 +1073,190 @@ async fn backlog_shell_echoes_the_requested_repo_into_the_form_input() {
         )
         .await
         .expect("response");
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(location, "/reports?kind=backlog&scope=repo%3Aglass");
+}
+
+#[tokio::test]
+async fn activity_report_generation_persists_and_reopens_by_stable_url() {
+    let glass = Glass::memory().expect("memory store");
+    glass
+        .publish_post(PublishPost {
+            session_id: None,
+            session_title: Some("report lane".to_string()),
+            agent: Some("report-agent".to_string()),
+            title: "Reportable post".to_string(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Metric,
+                    json!({"label": "status", "value": "green", "feedKind": "blocked"}),
+                )
+                .unwrap(),
+            ],
+        })
+        .expect("seed post");
+    let app = app_router(glass);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "kind": "activity-digest",
+                        "scope": { "type": "fleet" },
+                        "window": "today",
+                        "requestedBy": "test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["url"], "/reports/R-001");
+
+    let reopened = app
+        .oneshot(
+            Request::builder()
+                .uri("/reports/R-001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("reopen response");
+    assert_eq!(reopened.status(), StatusCode::OK);
+    let body = reopened.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert_shared_rail(&html, None);
-    assert!(!html.contains("{{REPO}}"));
-    assert!(html.contains(r#"value="glass""#));
+    assert_shared_rail(&html, Some("/reports"));
+    assert!(html.contains("Activity digest - fleet"));
+    assert!(html.contains("Reportable post"));
+    assert!(html.contains("Blocked"));
+}
+
+#[tokio::test]
+async fn custom_activity_report_generation_adds_a_new_library_row_each_time() {
+    let glass = Glass::memory().expect("memory store");
+    glass
+        .publish_post(PublishPost {
+            session_id: None,
+            session_title: Some("custom report lane".to_string()),
+            agent: Some("range-agent".to_string()),
+            title: "Custom range post".to_string(),
+            surfaces: vec![
+                Surface::new(
+                    SurfaceKind::Markdown,
+                    json!({"markdown": "inside the chosen range", "feedSummary": "custom range"}),
+                )
+                .unwrap(),
+            ],
+        })
+        .expect("seed post");
+    let app = app_router(glass);
+    let today = Local::now().date_naive();
+    let tomorrow = today + ChronoDuration::days(1);
+    let payload = json!({
+        "kind": "activity-digest",
+        "scope": "fleet",
+        "window": {
+            "type": "custom",
+            "start": today.format("%Y-%m-%d").to_string(),
+            "end": tomorrow.format("%Y-%m-%d").to_string()
+        },
+        "requestedBy": "test"
+    });
+
+    for expected_id in ["R-001", "R-002"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/reports")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["id"], expected_id);
+        assert_eq!(value["url"], format!("/reports/{expected_id}"));
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/reports")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("library response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let reports = value["reports"].as_array().expect("reports array");
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0]["id"], "R-002");
+    assert_eq!(reports[1]["id"], "R-001");
+    assert_eq!(reports[0]["meta"]["window"]["preset"], "custom");
+}
+
+#[tokio::test]
+async fn review_index_report_generation_persists_the_review_document() {
+    let app = app_router(Glass::memory().expect("memory store"));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "kind": "review-index",
+                        "scope": "fleet",
+                        "requestedBy": "test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["url"], "/reports/R-001");
+
+    let reopened = app
+        .oneshot(
+            Request::builder()
+                .uri("/reports/R-001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("reopen response");
+    assert_eq!(reopened.status(), StatusCode::OK);
+    let body = reopened.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Review index"));
+    assert!(html.contains("Persisted review surfaces"));
+    assert!(html.contains("Review surface sample diff"));
 }
 
 #[tokio::test]

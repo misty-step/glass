@@ -23,8 +23,6 @@ use glance_catalog::{Component, InlineNode, RenderContext, render_component};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{needs_you, sanctum_url, shell};
-
 /// A card counts as stale if untouched for this long -- long enough that a
 /// card genuinely being worked wouldn't trip it, short enough to surface
 /// backlog rot the operator asked to see without manually sifting tickets.
@@ -295,6 +293,12 @@ fn render_all(repo: &str, cards: &[RawCard]) -> String {
         .collect()
 }
 
+pub(crate) async fn generate_backlog_html(repo: &str) -> Result<(String, usize), String> {
+    let cards = fetch_cards(repo).await?;
+    let count = cards.len();
+    Ok((render_all(repo, &cards), count))
+}
+
 /// `GET /api/backlog/{repo}`. Streams a skeleton event, then a full event
 /// whose `html` is pre-rendered through `glance_catalog::render` from a live
 /// Powder `list_cards` call -- deterministic aggregation, no model call, no
@@ -307,12 +311,11 @@ pub async fn backlog_report(AxumPath(repo): AxumPath<String>) -> impl IntoRespon
                 .data(json!({"stage": "skeleton", "repo": repo}).to_string()),
         );
 
-        match fetch_cards(&repo).await {
-            Ok(cards) => {
-                let html = render_all(&repo, &cards);
+        match generate_backlog_html(&repo).await {
+            Ok((html, count)) => {
                 yield Ok::<_, Infallible>(
                     Event::default().event("full").data(
-                        json!({"stage": "full", "repo": repo, "count": cards.len(), "html": html})
+                        json!({"stage": "full", "repo": repo, "count": count, "html": html})
                             .to_string(),
                     ),
                 );
@@ -327,78 +330,6 @@ pub async fn backlog_report(AxumPath(repo): AxumPath<String>) -> impl IntoRespon
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-const BACKLOG_STYLE: &str = r#"
-.backlog-shell { max-width: 880px; margin: 0 auto; padding: var(--ae-space-6) var(--ae-space-5); }
-.backlog-form { display: flex; gap: var(--ae-space-3); margin-bottom: var(--ae-space-6); }
-.backlog-form input { flex: 1; padding: var(--ae-space-3); border: 1px solid var(--ae-line); background: var(--ae-surface); color: var(--ae-ink); font-family: var(--ae-font-mono); }
-.backlog-form button { padding: var(--ae-space-3) var(--ae-space-5); border: 1px solid var(--ae-ink); background: var(--ae-ink); color: var(--ae-surface); cursor: pointer; }
-.backlog-loading { color: var(--ae-ink-muted); padding: var(--ae-space-8) 0; text-align: center; }
-"#;
-
-const BACKLOG_BODY: &str = r#"
-    <div class="backlog-shell">
-      <form class="backlog-form" id="backlog-form">
-        <input type="text" id="backlog-repo" value="{{REPO}}" placeholder="repo name (e.g. glass)">
-        <button type="submit">Load</button>
-      </form>
-      <div id="backlog-body"><p class="backlog-loading">Loading&hellip;</p></div>
-    </div>
-"#;
-
-const BACKLOG_SCRIPT: &str = r#"
-(function(){
-  var bodyEl = document.getElementById('backlog-body');
-  var formEl = document.getElementById('backlog-form');
-  var inputEl = document.getElementById('backlog-repo');
-
-  function load(repo) {
-    bodyEl.innerHTML = '<p class="backlog-loading">Loading&hellip;</p>';
-    var es = new EventSource('/api/backlog/' + encodeURIComponent(repo));
-    es.addEventListener('skeleton', function(){
-      bodyEl.innerHTML = '<p class="backlog-loading">Querying Powder&hellip;</p>';
-    });
-    es.addEventListener('full', function(ev){
-      var data = JSON.parse(ev.data);
-      bodyEl.innerHTML = data.html;
-      es.close();
-    });
-    es.addEventListener('error', function(ev){
-      try {
-        var data = JSON.parse(ev.data);
-        bodyEl.innerHTML = '<p class="backlog-loading">' + data.message + '</p>';
-      } catch (e) {
-        bodyEl.innerHTML = '<p class="backlog-loading">Backlog report unavailable.</p>';
-      }
-      es.close();
-    });
-  }
-
-  formEl.addEventListener('submit', function(ev){
-    ev.preventDefault();
-    var repo = inputEl.value.trim();
-    if (repo) {
-      history.replaceState(null, '', '/backlog/' + encodeURIComponent(repo));
-      load(repo);
-    }
-  });
-
-  load(inputEl.value.trim());
-})();
-"#;
-
-pub async fn backlog_shell(AxumPath(repo): AxumPath<String>) -> impl IntoResponse {
-    let body = BACKLOG_BODY.replace("{{REPO}}", &repo);
-    axum::response::Html(shell::render_shell(shell::Shell {
-        title: "Glass - Backlog",
-        active: None,
-        needs_you_count: needs_you::awaiting_input_count().await,
-        sanctum_url: &sanctum_url(),
-        styles: BACKLOG_STYLE,
-        body: &body,
-        scripts: BACKLOG_SCRIPT,
-    }))
 }
 
 #[cfg(test)]

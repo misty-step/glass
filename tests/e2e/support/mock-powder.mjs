@@ -2,6 +2,7 @@ import http from "node:http";
 
 const port = Number(process.env.GLASS_E2E_POWDER_PORT || 19042);
 const now = Math.floor(Date.now() / 1000);
+const lastWeek = now - 7 * 86_400;
 
 const cards = [
   {
@@ -48,7 +49,7 @@ const cards = [
     status: "done",
     priority: "p1",
     blocked_by: [],
-    updated_at: now - 86_400,
+    updated_at: lastWeek,
   },
 ];
 
