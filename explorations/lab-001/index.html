@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glass Lab 001 — design registry</title>
+<link rel="stylesheet" href="fonts.css?v=1">
+<link rel="stylesheet" href="styles.css?v=1">
+</head>
+<body>
+<header id="topbar">
+  <span class="brand">GLASS · LAB 001 · ROUND 1</span>
+  <span id="optlabel"></span>
+  <span class="spacer"></span>
+  <nav id="vpctl">
+    <button data-vp="fit">fit</button>
+    <button data-vp="1440x900">1440</button>
+    <button data-vp="1280x800">1280</button>
+    <button data-vp="1024x768">1024</button>
+    <button data-vp="768x1024">tablet</button>
+    <button data-vp="390x844">phone</button>
+    <span class="custom">
+      <input id="cw" type="number" min="240" max="3840" placeholder="w">×<input id="ch" type="number" min="240" max="2400" placeholder="h">
+      <button id="applyCustom">go</button>
+    </span>
+    <span id="vpread"></span>
+  </nav>
+</header>
+<div id="body">
+  <aside id="registry"></aside>
+  <main id="stage"><div id="frameWrap"><iframe id="frame" title="option render"></iframe></div></main>
+</div>
+<script src="data.js?v=1"></script>
+<script src="parts.js?v=1"></script>
+<script src="sections/shell-agent.js?v=1"></script>
+<script src="sections/now-wire.js?v=1"></script>
+<script src="sections/reports.js?v=1"></script>
+<script src="sections/needs-clips.js?v=1"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>

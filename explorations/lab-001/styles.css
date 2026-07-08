@@ -1,0 +1,35 @@
+/* Lab shell chrome only — the options inside the iframe carry the design
+   system; this is deliberately plain instrument chrome. */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { display: flex; flex-direction: column; font: 13px/1.6 "Geist Mono", ui-monospace, Menlo, monospace; background: #f3f3f3; color: #151515; }
+@media (prefers-color-scheme: dark) { body { background: #1b1b1b; color: #ededed; } }
+
+#topbar { display: flex; align-items: center; gap: 1em; padding: 0.5em 1em; border-bottom: 1px solid #d5d5d5; flex: none; flex-wrap: wrap; }
+@media (prefers-color-scheme: dark) { #topbar { border-color: #333; } }
+.brand { font-weight: 800; letter-spacing: 0.12em; }
+#optlabel { opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34em; }
+.spacer { flex: 1; }
+#vpctl { display: flex; align-items: center; gap: 0.35em; flex-wrap: wrap; }
+#vpctl button { font: inherit; background: transparent; border: 1px solid #bbb; padding: 0.15em 0.6em; cursor: pointer; color: inherit; }
+#vpctl button.on { border-color: #2643d0; color: #2643d0; font-weight: 600; }
+@media (prefers-color-scheme: dark) { #vpctl button { border-color: #444; } #vpctl button.on { border-color: #8c9eff; color: #8c9eff; } }
+#vpctl .custom { display: inline-flex; align-items: center; gap: 0.25em; }
+#vpctl input { font: inherit; width: 4.5em; background: transparent; color: inherit; border: 0; border-bottom: 1px solid #bbb; }
+#vpread { opacity: 0.6; min-width: 11em; }
+
+#body { flex: 1; display: flex; min-height: 0; }
+#registry { width: 21rem; flex: none; overflow-y: auto; border-right: 1px solid #d5d5d5; padding: 1em 1.1em 3em; }
+@media (prefers-color-scheme: dark) { #registry { border-color: #333; } }
+#registry h2 { font-size: 11px; letter-spacing: 0.16em; margin: 1.6em 0 0.4em; opacity: 0.6; font-weight: 600; }
+#registry h2:first-child { margin-top: 0; }
+#registry .round { font-weight: 400; opacity: 0.7; }
+#registry a { display: block; color: inherit; text-decoration: none; padding: 0.28em 0.4em; border-left: 2px solid transparent; }
+#registry a:hover { border-left-color: #999; }
+#registry a.on { border-left-color: #2643d0; color: #2643d0; font-weight: 600; }
+@media (prefers-color-scheme: dark) { #registry a.on { border-left-color: #8c9eff; color: #8c9eff; } }
+#registry .thesis { display: block; font-size: 11px; opacity: 0.55; font-weight: 400; line-height: 1.45; }
+
+#stage { flex: 1; min-width: 0; display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 0.8em; }
+#frameWrap { transform-origin: top left; flex: none; box-shadow: 0 1px 8px rgba(0,0,0,0.18); }
+#frame { display: block; border: 0; background: #fcfcfc; width: 100%; height: 100%; }
