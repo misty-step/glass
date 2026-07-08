@@ -94,3 +94,35 @@ const DATA = {
     ],
   },
 };
+
+// Round 2: the REAL synthesis payload for report-doc options — the shape a
+// generative-UI report renderer consumes. All facts are true fleet history,
+// window 2026-07-07 18:00 → 2026-07-08 18:30 UTC.
+DATA.synthesis = {
+  query: { scope: "fleet", window: "past 24h", resolved: "2026-07-07 18:00 → 2026-07-08 18:30 UTC", cached: false, tookMs: 14200 },
+  headline: "The fleet redesigned its own operator surface and shipped it live",
+  tldr: "58 Powder cards completed across 8 repos. The dominant thread: the Glass operator-UI redesign went from spec to deployed in one day — six lanes, five glass PRs plus roster and sanctum, one disk-full crash recovered without losing work. One ask has been blocked 42 minutes on a Canary ingest key.",
+  numbers: { completed: 58, prs: 8, deploys: 1, incidents: 1, blocked: 1, questions: 2, releases: 1 },
+  themes: [
+    { title: "The Glass redesign shipped end to end", kind: "velocity",
+      body: "A full operator-UI redesign (epic glass-930) went spec → build → deploy inside the window: shared shell on every route (PR #15), the NOW wall joined from Powder claims and live sessions (PR #17), a reports engine (PR #18), needs-you/clips polish (PR #16), VISION.md + standing digests (PR #19). Roster lanes gained a publishing contract (roster PR #12) and the box now runs the result (sanctum PR #63, fly deploy healthy).",
+      evidence: [["glass PR #15","#0"],["glass PR #17","#0"],["glass PR #18","#0"],["sanctum PR #63","#0"]] },
+    { title: "One incident, recovered clean", kind: "reliability",
+      body: "The glass-933 build lane died mid-gate when the machine ran out of disk (os error 28, 217MB free). ~350 uncommitted lines were preserved; a recovery lane inherited the worktree, rebased over two merged siblings, and shipped. 41GB reclaimed by clearing stale cargo targets across six repos.",
+      evidence: [["receipt: glass-933 recovery","#0"]] },
+    { title: "Attention debt is accruing", kind: "risk",
+      body: "canary-100 has been blocked 42 minutes on a scoped ingest key — it gates glass-100 live-fire observability. Two questions wait: scrubbing tailnet hostnames from an overmind fixture (master publicability gate is red), and adopting the Mint proxy for Glass→Powder credentials.",
+      evidence: [["canary-100","#0"],["bastion-945","#0"],["mint-906","#0"]] },
+  ],
+  decisions: [
+    "Bridge stays dead; Glass is the single operator surface (ratified in VISION.md).",
+    "Reports are ad-hoc synthesis, cached not curated (operator ruling, lab-001 round 1).",
+    "Clips fold into the wire as an event kind (glass-942).",
+  ],
+  byRepo: [["glass", 14], ["canary", 9], ["linejam", 7], ["powder", 6], ["cairn", 5], ["bastion", 5], ["roster", 4], ["other", 8]],
+  agentHighlights: [
+    { agent: "glass-933-codex", line: "shipped the reports engine after surviving a disk-full crash" },
+    { agent: "cerberus", line: "verified all five glass merges on merged main" },
+    { agent: "canary-lane", line: "blocked 42m awaiting the ingest key" },
+  ],
+};

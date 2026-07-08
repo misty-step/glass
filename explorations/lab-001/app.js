@@ -3,17 +3,37 @@
 (function () {
   const SECTION_ORDER = [
     ["SHELL", "SHELL — the chrome & places"],
-    ["NOW", "NOW — the wall"],
-    ["WIRE", "WIRE — the ambient feed"],
-    ["REP", "REPORTS — generator + library"],
-    ["DOC", "REPORT DOC — the document"],
+    ["NOW", "NOW — active agents"],
+    ["WIRE", "WIRE — the one activity feed"],
+    ["REP", "REPORT — ask & render"],
+    ["DOC", "REPORT DOC — the synthesis"],
     ["NEED", "NEEDS YOU — the inbox"],
-    ["CLIP", "CLIPS — captured moments"],
-    ["AGENT", "AGENT — the drill-down"],
+    ["CLIP", "CLIPS — retired"],
+    ["AGENT", "AGENT — scoped composition"],
   ];
-  const ROUND = { n: 1, winners: {} }; // updated per operator verdicts
+  const ROUND = { n: 2, winners: {
+    SHELL: "left rail direction — shadcn-grade",
+    NOW: "NOW-5 direction — single column",
+    WIRE: "WIRE-6 direction — tape + pinned severity",
+    NEED: "NEED-1 LOCKED",
+  } };
+  // round-1 kills (IDs never reused; builders remain reachable by direct hash)
+  const KILLED = new Set([
+    "SHELL-2","SHELL-3","SHELL-4","SHELL-5","SHELL-6",
+    "NOW-2","NOW-3","NOW-4",
+    "WIRE-2","WIRE-3","WIRE-4","WIRE-5",
+    "REP-1","REP-2","REP-3","REP-4","REP-5","REP-6",
+    "DOC-1","DOC-2","DOC-3","DOC-4","DOC-5","DOC-6",
+    "NEED-2","NEED-3","NEED-4","NEED-5","NEED-6",
+    "CLIP-1","CLIP-2","CLIP-3","CLIP-4","CLIP-5","CLIP-6",
+    "AGENT-1","AGENT-2","AGENT-3","AGENT-4","AGENT-5",
+  ]);
+  const CLOSED_NOTES = {
+    CLIP: "closed — clips fold into the wire as an event kind (glass-942)",
+    NEED: "locked — baseline ships as-is",
+  };
 
-  const ids = Object.keys(window.SPECS || {});
+  const ids = Object.keys(window.SPECS || {}).filter((i) => !KILLED.has(i));
   const byPrefix = (p) => ids.filter((i) => i.split("-")[0] === p)
     .sort((a, b) => Number(a.split("-")[1]) - Number(b.split("-")[1]));
 
@@ -26,11 +46,18 @@
   let flat = [];
   SECTION_ORDER.forEach(([prefix, label]) => {
     const secIds = byPrefix(prefix);
-    if (!secIds.length) return;
     const h = document.createElement("h2");
     const win = ROUND.winners[prefix];
-    h.innerHTML = `${label} <span class="round">· round ${ROUND.n}${win ? " · winner: " + win : ""}</span>`;
+    h.innerHTML = `${label} <span class="round">· round ${ROUND.n}${win ? " · " + win : ""}</span>`;
     registry.appendChild(h);
+    if (CLOSED_NOTES[prefix]) {
+      const note = document.createElement("div");
+      note.className = "thesis";
+      note.style.padding = "0 0.4em 0.4em";
+      note.textContent = CLOSED_NOTES[prefix];
+      registry.appendChild(note);
+    }
+    if (!secIds.length) return;
     secIds.forEach((id) => {
       const s = window.SPECS[id];
       const a = document.createElement("a");
@@ -50,7 +77,7 @@
     if (!window.SPECS[id]) return;
     localStorage.setItem("lab001.opt", id);
     if (push) history.replaceState(null, "", "#" + id);
-    frame.src = "frame.html?v=1#" + id;
+    frame.src = "frame.html?v=2#" + id;
     optlabel.textContent = id + " — " + (window.SPECS[id].label || "") + (window.SPECS[id].thesis ? " · " + window.SPECS[id].thesis : "");
     registry.querySelectorAll("a").forEach((a) => a.classList.toggle("on", a.dataset.id === id));
     const on = registry.querySelector("a.on");

@@ -25,7 +25,7 @@ const parts = (() => {
     const link = (href, label, key) =>
       `<a href="#0" ${active === key ? 'aria-current="page"' : ""}>${label}</a>`;
     return `<aside class="ae-rail">
-      <div class="ae-logo"><span class="ae-app-mark">${icon("glass")}</span><span class="ae-name">Glass</span></div>
+      <div class="ae-logo"><span class="ae-app-mark">${icon("glass")}</span><span class="ae-name">GLASS</span></div>
       <p class="ae-h">PLACES</p>
       <nav>
         ${link("/", "Now", "now")}
