@@ -13,10 +13,11 @@ intentionally smaller than the implementation:
   evidence feed from native Glass posts plus configured Landmark release events.
 - The drill-down routes keep polling `/api/posts/recent` while loading rich
   surfaces through `/s/:post_id?part=N`.
-- Reports persist generated documents in SQLite. `POST /api/reports` writes
-  activity, fleet, backlog, and review-index reports; `GET /reports` lists the
-  library; `GET /reports/:id` reopens the stored document. The serve process
-  also schedules daily and weekly standing activity digests at local 06:00.
+- Reports persist generated documents in SQLite as a cache. `POST /api/reports`
+  renders activity, fleet, backlog, and review-index reports in place and
+  reuses an identical fresh query unless regeneration is requested;
+  `GET /reports/:id` reopens a cache handle. The serve process also pre-warms
+  daily and weekly standing activity digests at local 06:00.
 - Domain methods on `Glass` that tests exercise directly for exact asset
   semantics.
 
@@ -75,10 +76,15 @@ does not create a reply channel to the producing agent inside Glass.
 ## Reports
 
 The `reports` table stores report kind, scope, window, rendered HTML, metadata,
-generation time, and requester. Manual generation always creates a new report
-row. The standing digest scheduler is narrower: before inserting a daily or
-weekly activity digest, it skips when any fleet activity digest already exists
-for that exact window.
+generation time, and requester. Manual generation reuses the newest matching
+row within the cache TTL unless `regenerate` is set. The standing digest
+scheduler is narrower: before inserting a daily or weekly activity digest, it
+skips when any fleet activity digest already exists for that exact window.
+
+Agent scope filters Glass posts by the session's agent identity. Powder's card
+list does not expose a completion author, so agent reports omit Powder
+completions rather than falsely attribute fleet work to the selected agent.
+Fleet and repository scopes still include the Powder evidence they can prove.
 
 Legacy human routes `/rep1` and `/backlog/:repo` redirect to `/reports` with
 the matching generator kind/scope selected. The API routes

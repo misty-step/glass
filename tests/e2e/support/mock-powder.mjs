@@ -51,6 +51,15 @@ const cards = [
     blocked_by: [],
     updated_at: lastWeek,
   },
+  {
+    id: "powder-unattributed",
+    title: "Unattributed fleet completion",
+    status: "done",
+    priority: "p2",
+    repo: "powder",
+    blocked_by: [],
+    updated_at: now - 100,
+  },
 ];
 
 function seedAwaiting() {

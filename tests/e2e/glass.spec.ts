@@ -381,6 +381,7 @@ test("reports sentence builder renders and caches in place", async ({
   const report = page.locator("#reports-result .reports-doc");
   await expect(report).toContainText("Activity digest - fleet");
   await expect(report).toContainText("Rendered e2e seed");
+  await expect(report).toContainText("powder-unattributed");
   await expect(report.locator(".glass-rep-hero")).toBeVisible();
   await expect(report.locator(".glass-rep-pipeline")).toBeVisible();
   await expect(report.locator(".glass-rep-callouts")).toBeVisible();
@@ -440,6 +441,7 @@ test("agent page renders AGENT-8 tabs and scoped reports", async ({ page }) => {
   const scopedReport = page.locator("#agent-report-result .reports-doc");
   await expect(scopedReport).toContainText("Activity digest - agent e2e-agent");
   await expect(scopedReport).toContainText("Rendered e2e seed");
+  await expect(scopedReport).not.toContainText("powder-unattributed");
   await expect(scopedReport.locator(".glass-rep-hero")).toBeVisible();
 
   await page.goto("/agent/e2e-agent#report");
