@@ -19,14 +19,16 @@ the runtime with a native Rust service.
 - `/needs-you` is the operator ask queue. It reads Powder awaiting-input runs
   and relays answers to Powder; it does not create a Glass reply channel to the
   producing agent.
-- `/reports` is the persisted report library and generator. Activity digests,
-  fleet digests, backlog reports, review indexes, and the scheduled daily and
-  weekly standing digests all reopen at stable `/reports/:id` URLs.
+- `/reports` is an ad-hoc query surface: choose scope and window, then render
+  the report in place. Identical queries reuse the persisted render for 30
+  minutes; stable `/reports/:id` URLs remain cache handles, not a library the
+  operator has to curate.
 - Clips are one-way captures for moments from posts/surfaces. They remain
   available through `/api/clips` and report activity, but Clips is no longer a
   top-level operator place.
-- Every agent also has a live status feed at `/agent/:agent`, in addition to
-  the `/session/:id` drill-down.
+- Every agent also has an AGENT-8 page at `/agent/:agent`: state header plus
+  agent-scoped Wire and Report tabs, in addition to the `/session/:id`
+  drill-down.
 - Typed surfaces: `html`, `diff`, `image`, `trace`, `markdown`, `terminal`,
   `mermaid`, `json`, `code`, and `metric` (a label+value chip).
 - Content-addressed assets at `/a/:sha256`.
@@ -147,7 +149,7 @@ glass publish --db data/glass.db --title "Release shipped" \
 JSON
 ```
 
-Generate a persisted report:
+Generate or reuse a cached report:
 
 ```sh
 curl -s -X POST http://127.0.0.1:9041/api/reports \
@@ -155,13 +157,13 @@ curl -s -X POST http://127.0.0.1:9041/api/reports \
   --data '{
     "kind": "activity-digest",
     "scope": { "type": "fleet" },
-    "window": "last-week",
+    "window": "past-week",
     "requestedBy": "operator"
   }' | jq .
 ```
 
-The long-running `serve` process also writes standing daily and weekly
-activity digests into the same library at local 06:00.
+The long-running `serve` process also pre-warms standing daily and weekly
+activity digests at local 06:00.
 
 ## Verified-Live Walkthrough
 

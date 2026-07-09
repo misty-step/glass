@@ -223,7 +223,11 @@ impl ReportScope {
 
     fn matches_card(&self, card: &PowderCard) -> bool {
         match self.scope_type.as_str() {
-            "fleet" | "agent" => true,
+            "fleet" => true,
+            // Powder's card-list contract does not identify who completed a
+            // card. Treating every completion as the selected agent's work is
+            // worse than omitting unattributed evidence from that scope.
+            "agent" => false,
             "repo" => {
                 let Some(repo) = self.scope_value.as_deref() else {
                     return false;
@@ -2173,5 +2177,26 @@ mod tests {
         assert_eq!(window.preset, "custom");
         assert!(window.start < window.end);
         assert_eq!(window.label, "2026-07-01 - 2026-07-08");
+    }
+
+    #[test]
+    fn agent_scope_does_not_claim_unattributed_powder_completions() {
+        let card = PowderCard {
+            id: "powder-001".to_string(),
+            title: "Shipped elsewhere".to_string(),
+            status: "done".to_string(),
+            repo: Some("powder".to_string()),
+            priority: Some("p1".to_string()),
+            updated_at: Some(1),
+            completed_at: Some(1),
+        };
+
+        assert!(ReportScope::fleet().matches_card(&card));
+        assert!(
+            !ReportScope::new("agent", Some("lead-daybook".to_string()))
+                .expect("agent scope")
+                .matches_card(&card),
+            "Powder's list response has no completion author, so an agent report must not attribute the card"
+        );
     }
 }
