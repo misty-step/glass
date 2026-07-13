@@ -547,7 +547,7 @@ test("shared shell rail renders on every human HTML route", async ({ page }) => 
   await expectSharedRail(page, "Now");
 });
 
-test("needs-you renders mock Powder asks and relays an answer", async ({
+test("needs-you renders mock Bitterblossom asks and relays an answer", async ({
   page,
 }) => {
   await setSystemMode(page);
@@ -562,7 +562,7 @@ test("needs-you renders mock Powder asks and relays an answer", async ({
     "DECIDE: keep the rail active on viewer drill-downs?",
   );
   await expect(page.locator(".ny-row").first().locator(".ae-dim")).toContainText(
-    "glass-931-codex · powder glass-931 · asked",
+    "glass-931-codex · bitterblossom ask-shell",
   );
 
   await page.locator(".ny-row").first().getByRole("button", { name: "Answer" }).click();
@@ -576,7 +576,6 @@ test("needs-you renders mock Powder asks and relays an answer", async ({
     "WAITING ON YOU · 1",
   );
   await expectSharedRail(page, "Needs you · 1");
-  await expect(page.locator("details.ae-fold")).toContainText("ANSWERED");
 });
 
 test("shared rail becomes a burger sheet at 390px", async ({ page }) => {

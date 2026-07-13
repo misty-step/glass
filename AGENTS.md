@@ -11,7 +11,8 @@ grammar and owns the implementation.
 - Glass is ONE-WAY (glass-912, operator ruling 2026-07-07): there is no reply
   channel back to the producing agent. Do not reintroduce a comment/feedback
   surface, an `agent_seq` cursor, or a `wait_for_feedback`/`reply_to_user`
-  tool; communication with the operator happens somewhere else.
+  tool. Needs You may relay an operator answer to the external runtime that
+  owns an explicit ask; that is not an agent-authored Glass reply channel.
 - Every running agent has its own live status feed at `/agent/:agent`
   (`GET /api/posts/recent?agent=...`), in addition to the `/session/:id`
   drill-down. Dead sessions (quiet past `LIVE_WINDOW_SECONDS`) demote out of

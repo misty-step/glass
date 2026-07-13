@@ -345,7 +345,7 @@ pub(crate) async fn reports_shell(
     Ok(Html(shell::render_shell(shell::Shell {
         title: "Glass - Reports",
         active: Some(shell::Place::Reports),
-        needs_you_count: needs_you::awaiting_input_count().await,
+        needs_you_count: needs_you::needs_you_count().await,
         sanctum_url: &sanctum_url(),
         styles: &styles,
         body: &render_reports_body(&query),
@@ -365,7 +365,7 @@ pub(crate) async fn report_doc_shell(
     Ok(Html(shell::render_shell(shell::Shell {
         title: &format!("Glass - {}", report.id),
         active: Some(shell::Place::Reports),
-        needs_you_count: needs_you::awaiting_input_count().await,
+        needs_you_count: needs_you::needs_you_count().await,
         sanctum_url: &sanctum_url(),
         styles: &styles,
         body: &body,

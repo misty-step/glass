@@ -81,7 +81,7 @@ struct GateClaim {
 }
 
 pub async fn review_sample_shell() -> Response {
-    let needs_you_count = needs_you::awaiting_input_count().await;
+    let needs_you_count = needs_you::needs_you_count().await;
     match render_review_shell(&sample_review(), needs_you_count) {
         Ok(html) => Html(html).into_response(),
         Err(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),

@@ -1385,7 +1385,7 @@ async fn needs_you_shell_serves_the_rail_page() {
 }
 
 #[tokio::test]
-async fn needs_you_report_streams_a_skeleton_then_a_named_config_error_when_powder_unconfigured() {
+async fn needs_you_report_streams_a_skeleton_then_a_named_config_error_when_bb_unconfigured() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
             Request::builder()
@@ -1400,13 +1400,13 @@ async fn needs_you_report_streams_a_skeleton_then_a_named_config_error_when_powd
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("event: skeleton"));
     assert!(
-        text.contains("event: error") && text.contains("GLASS_POWDER_API_BASE_URL"),
-        "an unconfigured Powder connection must fail loudly, not silently: {text}"
+        text.contains("event: error") && text.contains("GLASS_BITTERBLOSSOM_API_BASE_URL"),
+        "an unconfigured Bitterblossom connection must fail loudly, not silently: {text}"
     );
 }
 
 #[tokio::test]
-async fn needs_you_answer_rejects_an_empty_answer_before_ever_reaching_powder() {
+async fn needs_you_answer_rejects_an_empty_answer_before_reaching_bb() {
     let response = app_router(Glass::memory().expect("memory store"))
         .oneshot(
             Request::builder()
@@ -1414,7 +1414,7 @@ async fn needs_you_answer_rejects_an_empty_answer_before_ever_reaching_powder() 
                 .uri("/api/needs-you/answer")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"run_id": "run-1", "answer": "   ", "actor": "operator"}).to_string(),
+                    json!({"ask_id": "ask-1", "answer": "   "}).to_string(),
                 ))
                 .unwrap(),
         )

@@ -34,7 +34,7 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: `GLASS_E2E_PORT=${glassPort} GLASS_POWDER_API_BASE_URL=${powderBaseUrl} GLASS_POWDER_API_KEY=e2e ./scripts/e2e-server.sh`,
+      command: `GLASS_E2E_PORT=${glassPort} GLASS_POWDER_API_BASE_URL=${powderBaseUrl} GLASS_POWDER_API_KEY=e2e GLASS_BITTERBLOSSOM_API_BASE_URL=${powderBaseUrl} GLASS_BITTERBLOSSOM_API_KEY=e2e ./scripts/e2e-server.sh`,
       url: `${glassBaseUrl}/api/surface-kinds`,
       reuseExistingServer: false,
       timeout: 120_000,

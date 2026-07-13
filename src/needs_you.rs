@@ -1,20 +1,9 @@
-//! Needs You (glass-918): the operator's whole input queue as a native Glass
-//! view, re-homed from bridge-003 (EPIC: the operator inbox) + bridge-006
-//! (answer relay must cover every repo). Parity source is factory-ops's
-//! `~/.factory-lanes/scripts/bridge.py` (`render_needs_you`) and
-//! `ask-triage.py` (the model curator) -- this module calls the curator as
-//! a subprocess and reads its annotation cache, it does not re-judge asks
-//! itself (operator ruling 2026-07-05: semantic judgment is a model's job,
-//! never a keyword heuristic).
-//!
-//! Unlike bridge.py's relay (`RELAY + "/bridge-answer"`, an external host
-//! bridge-006 flagged as repo-filtered), Glass answers natively: `POST
-//! /api/needs-you/answer` calls Powder's `answer_input` directly with no
-//! repo filter at all, so every repo's asks are answerable from here.
+//! Needs You: the operator's Bitterblossom HITL queue as a native Glass view.
+//! Bitterblossom owns ask state and answer/resume semantics; Glass is only an
+//! operator-facing projection and relay over its authenticated ask API.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::Json as AxumJson;
@@ -27,123 +16,40 @@ use serde_json::json;
 
 use crate::{sanctum_url, shell};
 
-fn powder_base_url() -> Option<String> {
-    std::env::var("GLASS_POWDER_API_BASE_URL")
+fn bitterblossom_base_url() -> Option<String> {
+    std::env::var("GLASS_BITTERBLOSSOM_API_BASE_URL")
         .ok()
         .filter(|v| !v.is_empty())
 }
 
-fn powder_board_url() -> Option<String> {
-    let operator_url = std::env::var("GLASS_POWDER_BOARD_URL")
+fn bitterblossom_dashboard_url() -> Option<String> {
+    let operator_url = std::env::var("GLASS_BITTERBLOSSOM_DASHBOARD_URL")
         .ok()
         .filter(|v| !v.is_empty());
-    let api_base = powder_base_url();
-    powder_board_url_from(operator_url.as_deref(), api_base.as_deref())
+    let api_base = bitterblossom_base_url();
+    operator_url
+        .or(api_base)
+        .map(|base| base.trim_end_matches('/').to_string())
 }
 
-fn powder_board_url_from(operator_url: Option<&str>, api_base: Option<&str>) -> Option<String> {
-    let base = operator_url
-        .filter(|value| !value.is_empty())
-        .or_else(|| api_base.filter(|value| !value.is_empty()))?;
-    Some(board_url_from_base(base))
-}
-
-fn board_url_from_base(base: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
-    if trimmed.ends_with("/board") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/board")
-    }
-}
-
-fn powder_api_key() -> Option<String> {
-    std::env::var("GLASS_POWDER_API_KEY")
+fn bitterblossom_api_key() -> Option<String> {
+    std::env::var("GLASS_BITTERBLOSSOM_API_KEY")
         .ok()
         .filter(|v| !v.is_empty())
 }
 
-/// The curator's annotation cache path, matching factory-ops's own
-/// `.ask-triage.json` convention -- overridable for tests, defaulting to
-/// the real path bridge.py and ask-triage.py already share.
-fn triage_cache_path() -> std::path::PathBuf {
-    std::env::var("GLASS_ASK_TRIAGE_CACHE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            std::path::PathBuf::from(home)
-                .join(".factory-lanes")
-                .join(".ask-triage.json")
-        })
-}
-
-fn triage_script_path() -> std::path::PathBuf {
-    std::env::var("GLASS_ASK_TRIAGE_SCRIPT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            std::path::PathBuf::from(home)
-                .join(".factory-lanes")
-                .join("scripts")
-                .join("ask-triage.py")
-        })
-}
-
-#[derive(Debug, Deserialize)]
-struct AwaitingResponse {
-    awaiting: Vec<AwaitingItem>,
-    #[serde(default)]
-    answered: Vec<AnsweredItem>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct NeedsYouData {
-    awaiting: Vec<AwaitingItem>,
-    answered: Vec<AnsweredItem>,
-}
-
 #[derive(Debug, Deserialize, Clone)]
-struct AwaitingItem {
-    card: CardBrief,
-    question: Option<QuestionPayload>,
-    run: RunInfo,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct CardBrief {
+struct OpenAsk {
     id: String,
-    title: String,
-    #[serde(default)]
-    repo: Option<String>,
-    #[serde(default)]
-    priority: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct QuestionPayload {
-    payload: String,
-    #[serde(default)]
-    created_at: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct RunInfo {
-    id: String,
-    agent: String,
-    #[serde(default)]
-    created_at: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct AnsweredItem {
-    card: CardBrief,
-    #[serde(default)]
-    question: Option<QuestionPayload>,
-    run: RunInfo,
-    #[serde(default)]
+    run_id: String,
+    task: String,
+    kind: String,
+    question: String,
+    context: Option<String>,
+    blocking: bool,
+    state: String,
+    created_at: String,
     answer: Option<String>,
-    #[serde(default)]
-    answered_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -164,44 +70,42 @@ struct TriageAnnotation {
     reason: Option<String>,
     #[serde(default)]
     judge: Option<String>,
-    #[serde(default)]
-    run: Option<String>,
 }
 
-async fn fetch_awaiting() -> Result<NeedsYouData, String> {
+async fn fetch_awaiting() -> Result<Vec<OpenAsk>, String> {
     fetch_awaiting_with_reporting(true).await
 }
 
-async fn fetch_awaiting_silent() -> Result<NeedsYouData, String> {
+async fn fetch_awaiting_silent() -> Result<Vec<OpenAsk>, String> {
     fetch_awaiting_with_reporting(false).await
 }
 
-async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<NeedsYouData, String> {
-    let base = match powder_base_url() {
+async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<Vec<OpenAsk>, String> {
+    let base = match bitterblossom_base_url() {
         Some(base) => base,
         None => {
             if report_errors {
                 crate::canary::report_error(
                     "glass.needs_you.fetch.failed",
-                    "route=/api/needs-you upstream=powder error_kind=missing_base_url",
+                    "route=/api/needs-you upstream=bitterblossom error_kind=missing_base_url",
                 );
             }
-            return Err("GLASS_POWDER_API_BASE_URL is not configured".to_string());
+            return Err("GLASS_BITTERBLOSSOM_API_BASE_URL is not configured".to_string());
         }
     };
-    let key = match powder_api_key() {
+    let key = match bitterblossom_api_key() {
         Some(key) => key,
         None => {
             if report_errors {
                 crate::canary::report_error(
                     "glass.needs_you.fetch.failed",
-                    "route=/api/needs-you upstream=powder error_kind=missing_api_key",
+                    "route=/api/needs-you upstream=bitterblossom error_kind=missing_api_key",
                 );
             }
-            return Err("GLASS_POWDER_API_KEY is not configured".to_string());
+            return Err("GLASS_BITTERBLOSSOM_API_KEY is not configured".to_string());
         }
     };
-    let url = awaiting_input_url_from_api_base(&base);
+    let url = asks_url_from_api_base(&base);
     let response = reqwest::Client::new()
         .get(&url)
         .bearer_auth(&key)
@@ -211,7 +115,7 @@ async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<NeedsYouDa
             if report_errors {
                 crate::canary::report_error(
                     "glass.needs_you.fetch.failed",
-                    "route=/api/needs-you upstream=powder error_kind=transport",
+                    "route=/api/needs-you upstream=bitterblossom error_kind=transport",
                 );
             }
             format!("fetch {url}: {err}")
@@ -221,7 +125,7 @@ async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<NeedsYouDa
             crate::canary::report_error(
                 "glass.needs_you.fetch.failed",
                 &format!(
-                    "route=/api/needs-you upstream=powder upstream_status={} error_kind=upstream_status",
+                    "route=/api/needs-you upstream=bitterblossom upstream_status={} error_kind=upstream_status",
                     response.status().as_u16()
                 ),
             );
@@ -231,144 +135,45 @@ async fn fetch_awaiting_with_reporting(report_errors: bool) -> Result<NeedsYouDa
             response.status()
         ));
     }
-    let mut data = response
-        .json::<AwaitingResponse>()
-        .await
-        .map(|body| NeedsYouData {
-            awaiting: body.awaiting,
-            answered: body.answered,
-        })
-        .map_err(|err| {
-            if report_errors {
-                crate::canary::report_error(
-                    "glass.needs_you.fetch.failed",
-                    "route=/api/needs-you upstream=powder error_kind=parse",
-                );
-            }
-            format!("parse {url}: {err}")
-        })?;
-    sort_awaiting(&mut data.awaiting);
-    data.answered.sort_by(|a, b| {
-        b.answered_at
-            .unwrap_or(0)
-            .cmp(&a.answered_at.unwrap_or(0))
-            .then_with(|| a.card.id.cmp(&b.card.id))
-    });
-    Ok(data)
-}
-
-fn awaiting_input_url_from_api_base(base: &str) -> String {
-    format!(
-        "{}/api/v1/runs/awaiting-input?limit=100",
-        base.trim_end_matches('/')
-    )
-}
-
-/// factory-ops's own sort contract (bridge.py's `collect_needs_you`):
-/// session-repo asks first (conversation beats paperwork), then priority,
-/// then card id -- preserved here for parity even though Glass renders
-/// grouped by curator kind, not sort order, so the same relative ordering
-/// survives within each kind's group.
-fn sort_awaiting(items: &mut [AwaitingItem]) {
-    const SESSION_REPOS: [&str; 2] = ["factory/session", "session"];
-    items.sort_by(|a, b| {
-        let a_session = a
-            .card
-            .repo
-            .as_deref()
-            .is_some_and(|r| SESSION_REPOS.contains(&r));
-        let b_session = b
-            .card
-            .repo
-            .as_deref()
-            .is_some_and(|r| SESSION_REPOS.contains(&r));
-        b_session
-            .cmp(&a_session)
-            .then_with(|| {
-                let a_priority = a.card.priority.as_deref().unwrap_or("p9");
-                let b_priority = b.card.priority.as_deref().unwrap_or("p9");
-                a_priority.cmp(b_priority)
-            })
-            .then_with(|| a.card.id.cmp(&b.card.id))
-    });
-}
-
-/// Reads whatever the curator has already annotated, keyed by run id --
-/// never blocks on a fresh judgment (see `trigger_triage_refresh_once`).
-fn load_triage_annotations() -> HashMap<String, TriageAnnotation> {
-    let Ok(raw) = std::fs::read_to_string(triage_cache_path()) else {
-        return HashMap::new();
-    };
-    let Ok(cache) = serde_json::from_str::<HashMap<String, TriageAnnotation>>(&raw) else {
-        return HashMap::new();
-    };
-    cache
-        .into_values()
-        .filter_map(|ann| ann.run.clone().map(|run| (run, ann)))
-        .collect()
-}
-
-static TRIAGE_RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// Best-effort, fire-and-forget refresh of the curator's annotation cache.
-/// Guarded by a single in-flight flag so concurrent requests never spawn
-/// duplicate model-calling subprocesses; ask-triage.py's own payload-hash
-/// cache makes repeat invocations cheap for already-judged asks. A dead or
-/// missing curator script degrades to "untriaged" rows (fail-open,
-/// matching bridge.py's own posture) rather than failing the request.
-fn trigger_triage_refresh_once() {
-    if TRIAGE_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    let script = triage_script_path();
-    tokio::spawn(async move {
-        if script.is_file() {
-            let result = tokio::time::timeout(
-                Duration::from_secs(90),
-                tokio::process::Command::new("python3")
-                    .arg(&script)
-                    .arg("--quiet")
-                    .output(),
-            )
-            .await;
-            match result {
-                Ok(Ok(output)) if output.status.success() => {}
-                Ok(Ok(output)) => {
-                    crate::canary::report_error(
-                        "glass.needs_you.triage_refresh.failed",
-                        &format!(
-                            "task=ask-triage error_kind=exit_status status={}",
-                            output.status.code().unwrap_or(-1)
-                        ),
-                    );
-                }
-                Ok(Err(_)) => {
-                    crate::canary::report_error(
-                        "glass.needs_you.triage_refresh.failed",
-                        "task=ask-triage error_kind=spawn",
-                    );
-                }
-                Err(_) => {
-                    crate::canary::report_error(
-                        "glass.needs_you.triage_refresh.failed",
-                        "task=ask-triage error_kind=timeout",
-                    );
-                }
-            }
+    let mut asks = response.json::<Vec<OpenAsk>>().await.map_err(|err| {
+        if report_errors {
+            crate::canary::report_error(
+                "glass.needs_you.fetch.failed",
+                "route=/api/needs-you upstream=bitterblossom error_kind=parse",
+            );
         }
-        TRIAGE_RUNNING.store(false, Ordering::SeqCst);
+        format!("parse {url}: {err}")
+    })?;
+    sort_awaiting(&mut asks);
+    Ok(asks)
+}
+
+fn asks_url_from_api_base(base: &str) -> String {
+    format!("{}/api/asks", base.trim_end_matches('/'))
+}
+
+/// Blocking asks first, then stable oldest-first order. These are declared BB
+/// fields, so Glass does not need to infer urgency from prose.
+fn sort_awaiting(items: &mut [OpenAsk]) {
+    items.sort_by(|a, b| {
+        b.blocking
+            .cmp(&a.blocking)
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
-fn kind_of(ann: Option<&TriageAnnotation>) -> &'static str {
+fn kind_of(ann: Option<&TriageAnnotation>, declared: &str) -> &'static str {
     match ann.and_then(|a| a.kind.as_deref()) {
         Some("question") => "question",
         Some("act") => "act",
-        Some("endorse") => "endorse",
-        _ => "decide",
+        Some("endorse" | "approval") => "endorse",
+        _ => match declared {
+            "question" => "question",
+            "act" => "act",
+            "endorse" | "approval" => "endorse",
+            _ => "decide",
+        },
     }
 }
 
@@ -385,11 +190,11 @@ fn html_escape(raw: &str) -> String {
         .collect()
 }
 
-fn relative_time(ts: i64, now: DateTime<Utc>) -> String {
-    let Some(then) = DateTime::from_timestamp(ts, 0) else {
+fn relative_time(ts: &str, now: DateTime<Utc>) -> String {
+    let Ok(then) = DateTime::parse_from_rfc3339(ts) else {
         return "?".to_string();
     };
-    let delta = (now - then).num_seconds();
+    let delta = (now - then.with_timezone(&Utc)).num_seconds();
     if delta < 60 {
         "just now".to_string()
     } else if delta < 3600 {
@@ -407,33 +212,22 @@ struct Rendered {
 }
 
 fn render_item(
-    item: &AwaitingItem,
+    item: &OpenAsk,
     ann: Option<&TriageAnnotation>,
     now: DateTime<Utc>,
-    board_url: &str,
+    dashboard_url: &str,
 ) -> Rendered {
-    let card_id = &item.card.id;
-    let run_id = &item.run.id;
-    let question_text = item
-        .question
-        .as_ref()
-        .map(|q| q.payload.clone())
-        .unwrap_or_else(|| item.card.title.clone());
-    let kind = kind_of(ann);
+    let ask_id = &item.id;
+    let question_text = &item.question;
+    let kind = kind_of(ann, &item.kind);
     let ask_line = ann.and_then(|a| a.ask_line.clone()).unwrap_or_else(|| {
         question_text
             .lines()
             .next()
-            .unwrap_or(&item.card.title)
+            .unwrap_or(&item.task)
             .to_string()
     });
-    let created_at = item
-        .question
-        .as_ref()
-        .and_then(|q| q.created_at)
-        .or(item.run.created_at)
-        .unwrap_or_else(|| now.timestamp());
-    let age = relative_time(created_at, now);
+    let age = relative_time(&item.created_at, now);
     let untriaged_marker = if ann.is_none() {
         r#" <span class="ae-tag ae-tag-bare ny-untriaged" title="curator has not judged this ask yet">untriaged</span>"#
     } else {
@@ -442,21 +236,24 @@ fn render_item(
     let blocker = ann
         .and_then(|a| a.situation.as_deref())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(item.card.title.as_str());
-    let sheet_id = format!("ny-sheet-{}", html_escape(card_id));
+        .or(item.context.as_deref())
+        .unwrap_or(item.task.as_str());
+    let sheet_id = format!("ny-sheet-{}", html_escape(ask_id));
 
     let row = format!(
         r#"<div class="ny-row ny-row-{kind}">
   <span class="ny-row-text">
     <span class="ae-item">{ask_line}</span>{untriaged_marker}<br>
-    <span class="ae-dim ny-meta-line">{agent} &middot; powder {card_id} &middot; asked {age} &middot; {blocker}</span>
+    <span class="ae-dim ny-meta-line">{task} &middot; bitterblossom {ask_id} &middot; {ask_kind} &middot; {state} &middot; asked {age} &middot; {blocker}</span>
   </span>
   <button type="button" class="ae-button ae-button-quiet ny-open-btn" data-sheet="{sheet_id}">Answer</button>
 </div>"#,
         kind = kind,
         sheet_id = sheet_id,
-        agent = html_escape(&item.run.agent),
-        card_id = html_escape(card_id),
+        task = html_escape(&item.task),
+        ask_id = html_escape(ask_id),
+        ask_kind = html_escape(&item.kind),
+        state = html_escape(&item.state),
         ask_line = html_escape(&ask_line),
         untriaged_marker = untriaged_marker,
         age = age,
@@ -510,7 +307,9 @@ fn render_item(
             .collect()
     };
 
-    let prefill = if kind == "endorse" {
+    let prefill = if let Some(answer) = item.answer.as_ref() {
+        answer.clone()
+    } else if kind == "endorse" {
         ann.and_then(|a| a.recommended_answer.clone())
             .unwrap_or_default()
     } else {
@@ -520,27 +319,27 @@ fn render_item(
     let sheet = format!(
         r#"<div hidden id="{sheet_id}">
 <p class="ny-sheet-title">{title}</p>
-<p class="ny-meta">{card_id} &middot; asked {age} &middot; <a href="{board_url}#card-{card_id}">board &rarr;</a></p>
+<p class="ny-meta">{ask_id} &middot; run {run_id} &middot; asked {age} &middot; <a href="{dashboard_url}">Bitterblossom &rarr;</a></p>
 {curator}
 <div class="ny-evidence-row">{ev_html}</div>
-<details class="ny-raw"><summary>raw ask from {agent}</summary><div class="ny-raw-text">{question}</div></details>
+<details class="ny-raw"><summary>raw ask from {task}</summary><div class="ny-raw-text">{question}</div></details>
 <div class="ny-form">
   <textarea class="ae-input" rows="4" placeholder="Type your answer&hellip;">{prefill}</textarea>
-  <button class="ae-button ae-button-compact ny-answer-btn" data-card="{card_id}" data-run="{run_id}">Answer</button>
+  <button class="ae-button ae-button-compact ny-answer-btn" data-ask="{ask_id}">Answer</button>
   <span class="ny-status"></span>
 </div>
 </div>"#,
         sheet_id = sheet_id,
-        title = html_escape(&item.card.title),
-        card_id = html_escape(card_id),
+        title = html_escape(&item.task),
+        ask_id = html_escape(ask_id),
+        run_id = html_escape(&item.run_id),
         age = age,
-        board_url = board_url,
+        dashboard_url = html_escape(dashboard_url),
         curator = curator,
         ev_html = ev_html,
-        agent = html_escape(&item.run.agent),
-        question = html_escape(&question_text).replace('\n', "<br>"),
+        task = html_escape(&item.task),
+        question = html_escape(question_text).replace('\n', "<br>"),
         prefill = html_escape(&prefill),
-        run_id = html_escape(run_id),
     );
 
     Rendered {
@@ -548,60 +347,15 @@ fn render_item(
     }
 }
 
-fn render_answered_item(item: &AnsweredItem, now: DateTime<Utc>) -> String {
-    let question_text = item
-        .question
-        .as_ref()
-        .map(|q| q.payload.clone())
-        .unwrap_or_else(|| item.card.title.clone());
-    let ask_line = question_text
-        .lines()
-        .next()
-        .unwrap_or(&item.card.title)
-        .to_string();
-    let answered_at = item
-        .answered_at
-        .or_else(|| item.question.as_ref().and_then(|q| q.created_at))
-        .or(item.run.created_at)
-        .unwrap_or_else(|| now.timestamp());
-    let age = relative_time(answered_at, now);
-    let answer = item.answer.as_deref().unwrap_or("").trim();
-    let answer_html = if answer.is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#"<span class="ae-dim ny-meta-line">answered: {}</span>"#,
-            html_escape(answer)
-        )
-    };
-    format!(
-        r#"<div class="ny-answered-row">
-  <span class="ae-item">{ask_line}</span><br>
-  <span class="ae-dim ny-meta-line">{agent} &middot; powder {card_id} &middot; answered {age}</span>
-  {answer_html}
-</div>"#,
-        ask_line = html_escape(&ask_line),
-        agent = html_escape(&item.run.agent),
-        card_id = html_escape(&item.card.id),
-        age = age,
-        answer_html = answer_html,
-    )
+fn render_needs_you(items: &[OpenAsk], annotations: &HashMap<String, TriageAnnotation>) -> String {
+    let dashboard_url = bitterblossom_dashboard_url().unwrap_or_else(|| "#".to_string());
+    render_needs_you_with_dashboard_url(items, annotations, &dashboard_url)
 }
 
-fn render_needs_you(
-    items: &[AwaitingItem],
-    answered: &[AnsweredItem],
+fn render_needs_you_with_dashboard_url(
+    items: &[OpenAsk],
     annotations: &HashMap<String, TriageAnnotation>,
-) -> String {
-    let board_url = powder_board_url().unwrap_or_else(|| "#".to_string());
-    render_needs_you_with_board_url(items, answered, annotations, &board_url)
-}
-
-fn render_needs_you_with_board_url(
-    items: &[AwaitingItem],
-    answered: &[AnsweredItem],
-    annotations: &HashMap<String, TriageAnnotation>,
-    board_url: &str,
+    dashboard_url: &str,
 ) -> String {
     let now = Utc::now();
     let mut out = format!(
@@ -616,52 +370,37 @@ fn render_needs_you_with_board_url(
         let rows = items
             .iter()
             .map(|item| {
-                render_item(item, annotations.get(&item.run.id), now, board_url).row_and_sheet
+                render_item(item, annotations.get(&item.run_id), now, dashboard_url).row_and_sheet
             })
             .collect::<Vec<_>>()
             .join("");
         out.push_str(&format!(r#"<div class="ny-list">{rows}</div>"#));
     }
 
-    if !answered.is_empty() {
-        let rows = answered
-            .iter()
-            .map(|item| render_answered_item(item, now))
-            .collect::<Vec<_>>()
-            .join("");
-        out.push_str(&format!(
-            r#"<details class="ae-fold ny-answered"><summary><span class="ae-dim">ANSWERED</span><span class="ae-dim">{} from API</span></summary>{rows}</details>"#,
-            answered.len()
-        ));
-    }
-
     out
 }
 
-pub(crate) async fn awaiting_input_count() -> Option<usize> {
+pub(crate) async fn needs_you_count() -> Option<usize> {
     tokio::time::timeout(Duration::from_millis(750), fetch_awaiting_silent())
         .await
         .ok()
         .and_then(Result::ok)
-        .map(|data| data.awaiting.len())
+        .map(|asks| asks.len())
 }
 
 /// `GET /api/needs-you`. Streams a skeleton event, then a full event with
-/// pre-rendered ask rows sourced from Powder's `runs/awaiting-input` (no
-/// repo filter -- every repo's asks land here, closing bridge-006's gap)
-/// with curator annotations read from `.ask-triage.json`. A curator refresh
-/// is kicked off best-effort in the background (never blocks this response).
+/// pre-rendered ask rows sourced from Bitterblossom's unanswered asks
+/// using Bitterblossom's declared ask fields. Glass neither launches the
+/// legacy Powder-backed curator nor consumes its run-keyed cache.
 pub async fn needs_you_report() -> impl IntoResponse {
-    trigger_triage_refresh_once();
     let stream = async_stream::stream! {
         yield Ok::<_, Infallible>(Event::default().event("skeleton").data(json!({"stage": "skeleton"}).to_string()));
         match fetch_awaiting().await {
-            Ok(data) => {
-                let annotations = load_triage_annotations();
-                let html = render_needs_you(&data.awaiting, &data.answered, &annotations);
+            Ok(asks) => {
+                let html = render_needs_you(&asks, &HashMap::new());
                 yield Ok::<_, Infallible>(
                     Event::default().event("full").data(
-                        json!({"stage": "full", "count": data.awaiting.len(), "html": html}).to_string(),
+                        json!({"stage": "full", "count": asks.len(), "html": html}).to_string(),
                     ),
                 );
             }
@@ -675,20 +414,10 @@ pub async fn needs_you_report() -> impl IntoResponse {
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-// Note: the client also sends `card_id` (for parity with factory-ops's own
-// relay contract and easier debugging in browser devtools), but the server
-// only needs `run_id` to answer -- serde ignores the extra field rather
-// than rejecting it, so no `deny_unknown_fields` friction either way.
 #[derive(Debug, Deserialize)]
 pub struct AnswerRequest {
-    pub run_id: String,
+    pub ask_id: String,
     pub answer: String,
-    #[serde(default = "default_actor")]
-    pub actor: String,
-}
-
-fn default_actor() -> String {
-    "operator".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -696,10 +425,13 @@ pub struct AnswerResponse {
     ok: bool,
 }
 
+fn answer_url_from_api_base(base: &str, ask_id: &str) -> String {
+    format!("{}/api/asks/{ask_id}/answer", base.trim_end_matches('/'))
+}
+
 /// `POST /api/needs-you/answer`. Glass's own native answer relay --
-/// resolves bridge-006 by calling Powder's `answer_input` directly with no
-/// repo filter, rather than proxying through an external bridge-poll
-/// process scoped to one repo.
+/// relays the operator answer to Bitterblossom, which owns both recording the
+/// answer and resuming a parked workflow when required.
 pub async fn answer(
     AxumJson(request): AxumJson<AnswerRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -709,41 +441,37 @@ pub async fn answer(
             "answer must not be empty".to_string(),
         ));
     }
-    let base = powder_base_url().ok_or_else(|| {
+    let base = bitterblossom_base_url().ok_or_else(|| {
         crate::canary::report_error(
             "glass.needs_you.answer.failed",
-            "route=/api/needs-you/answer upstream=powder error_kind=missing_base_url",
+            "route=/api/needs-you/answer upstream=bitterblossom error_kind=missing_base_url",
         );
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            "GLASS_POWDER_API_BASE_URL is not configured".to_string(),
+            "GLASS_BITTERBLOSSOM_API_BASE_URL is not configured".to_string(),
         )
     })?;
-    let key = powder_api_key().ok_or_else(|| {
+    let key = bitterblossom_api_key().ok_or_else(|| {
         crate::canary::report_error(
             "glass.needs_you.answer.failed",
-            "route=/api/needs-you/answer upstream=powder error_kind=missing_api_key",
+            "route=/api/needs-you/answer upstream=bitterblossom error_kind=missing_api_key",
         );
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            "GLASS_POWDER_API_KEY is not configured".to_string(),
+            "GLASS_BITTERBLOSSOM_API_KEY is not configured".to_string(),
         )
     })?;
-    let url = format!(
-        "{}/api/v1/runs/{}/answer",
-        base.trim_end_matches('/'),
-        request.run_id
-    );
+    let url = answer_url_from_api_base(&base, &request.ask_id);
     let response = reqwest::Client::new()
         .post(&url)
         .bearer_auth(&key)
-        .json(&json!({"actor": request.actor, "answer": request.answer}))
+        .json(&json!({"answered_by": "operator", "answer": request.answer}))
         .send()
         .await
         .map_err(|err| {
             crate::canary::report_error(
                 "glass.needs_you.answer.failed",
-                "route=/api/needs-you/answer upstream=powder error_kind=transport",
+                "route=/api/needs-you/answer upstream=bitterblossom error_kind=transport",
             );
             (StatusCode::BAD_GATEWAY, format!("post {url}: {err}"))
         })?;
@@ -752,13 +480,13 @@ pub async fn answer(
         crate::canary::report_error(
             "glass.needs_you.answer.failed",
             &format!(
-                "route=/api/needs-you/answer upstream=powder upstream_status={} error_kind=upstream_status",
+                "route=/api/needs-you/answer upstream=bitterblossom upstream_status={} error_kind=upstream_status",
                 status.as_u16()
             ),
         );
         return Err((
             StatusCode::BAD_GATEWAY,
-            format!("powder answer_input returned {status}"),
+            format!("bitterblossom answer_ask returned {status}"),
         ));
     }
     Ok(AxumJson(AnswerResponse { ok: true }))
@@ -812,7 +540,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
   dialog.addEventListener('close', function(){ dialogBody.innerHTML = ''; });
 
   // Draft-safety (parity with factory-ops's bridge.py): drafts persist to
-  // localStorage keyed by run id, restored on sheet open, cleared on
+  // localStorage keyed by ask id, restored on sheet open, cleared on
   // successful answer. guardedRefresh never reloads while a draft exists,
   // a sheet is open, or a textarea has focus/content.
   function busy() {
@@ -837,19 +565,19 @@ const NEEDS_YOU_SCRIPT: &str = r#"
     if (t.tagName !== 'TEXTAREA') return;
     var btn = t.parentElement && t.parentElement.querySelector('.ny-answer-btn');
     if (!btn) return;
-    try { localStorage.setItem('ny-draft-' + btn.getAttribute('data-run'), t.value); } catch (err) {}
+    try { localStorage.setItem('ny-draft-' + btn.getAttribute('data-ask'), t.value); } catch (err) {}
   });
   function restoreDraft(scope) {
     var btn = scope.querySelector('.ny-answer-btn');
     var ta = scope.querySelector('textarea');
     if (!btn || !ta) return;
     try {
-      var d = localStorage.getItem('ny-draft-' + btn.getAttribute('data-run'));
+      var d = localStorage.getItem('ny-draft-' + btn.getAttribute('data-ask'));
       if (d && !ta.value) ta.value = d;
     } catch (err) {}
   }
-  function clearDraft(runId) {
-    try { localStorage.removeItem('ny-draft-' + runId); } catch (err) {}
+  function clearDraft(askId) {
+    try { localStorage.removeItem('ny-draft-' + askId); } catch (err) {}
   }
   function updateRailCount(count) {
     if (typeof count !== 'number') return;
@@ -866,7 +594,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
       if (btn._wired) return;
       btn._wired = true;
       btn.addEventListener('click', async function(){
-        var cardId = btn.dataset.card, runId = btn.dataset.run;
+        var askId = btn.dataset.ask;
         var form = btn.closest('.ny-form');
         var ta = form.querySelector('textarea');
         var status = form.querySelector('.ny-status');
@@ -878,7 +606,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
           var res = await fetch('/api/needs-you/answer', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({card_id: cardId, run_id: runId, answer: answer, actor: 'operator'})
+            body: JSON.stringify({ask_id: askId, answer: answer})
           });
           if (!res.ok) {
             status.textContent = 'error: ' + (await res.text()).slice(0, 160);
@@ -886,7 +614,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
             return;
           }
           status.textContent = 'answered — refreshing…';
-          clearDraft(runId);
+          clearDraft(askId);
           setTimeout(function(){ dialog.close(); load(); }, 600);
         } catch (err) {
           status.textContent = 'error: ' + err;
@@ -938,7 +666,7 @@ const NEEDS_YOU_SCRIPT: &str = r#"
 "#;
 
 pub async fn needs_you_shell() -> impl IntoResponse {
-    let count = awaiting_input_count().await;
+    let count = needs_you_count().await;
     axum::response::Html(shell::render_shell(shell::Shell {
         title: "Glass - Needs You",
         active: Some(shell::Place::NeedsYou),
@@ -954,29 +682,24 @@ pub async fn needs_you_shell() -> impl IntoResponse {
 mod tests {
     use super::*;
 
-    fn awaiting_item(card_id: &str, run_id: &str, agent: &str, payload: &str) -> AwaitingItem {
-        AwaitingItem {
-            card: CardBrief {
-                id: card_id.to_string(),
-                title: format!("{card_id} title"),
-                repo: Some("glass".to_string()),
-                priority: Some("p1".to_string()),
-            },
-            question: Some(QuestionPayload {
-                payload: payload.to_string(),
-                created_at: Some(Utc::now().timestamp() - 3600),
-            }),
-            run: RunInfo {
-                id: run_id.to_string(),
-                agent: agent.to_string(),
-                created_at: Some(Utc::now().timestamp() - 3600),
-            },
+    fn open_ask(ask_id: &str, run_id: &str, task: &str, question: &str) -> OpenAsk {
+        OpenAsk {
+            id: ask_id.to_string(),
+            run_id: run_id.to_string(),
+            task: task.to_string(),
+            kind: "decision".to_string(),
+            question: question.to_string(),
+            context: Some(format!("{task} needs a decision")),
+            blocking: true,
+            state: "open".to_string(),
+            created_at: (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            answer: None,
         }
     }
 
     #[test]
     fn kind_of_defaults_to_decide_when_untriaged() {
-        assert_eq!(kind_of(None), "decide");
+        assert_eq!(kind_of(None, "decision"), "decide");
     }
 
     #[test]
@@ -985,21 +708,25 @@ mod tests {
             kind: Some("question".to_string()),
             ..Default::default()
         };
-        assert_eq!(kind_of(Some(&ann)), "question");
+        assert_eq!(kind_of(Some(&ann), "decision"), "question");
+    }
+
+    #[test]
+    fn kind_of_maps_declared_bb_approval_to_endorse() {
+        assert_eq!(kind_of(None, "approval"), "endorse");
     }
 
     #[test]
     fn render_needs_you_uses_fig5_waiting_rows() {
         let items = vec![
-            awaiting_item("glass-1", "run-1", "team-lead", "DECIDE: pick a path"),
-            awaiting_item("glass-2", "run-2", "reviewer", "ACT: approve the fixture"),
+            open_ask("ask-1", "run-1", "team-lead", "DECIDE: pick a path"),
+            open_ask("ask-2", "run-2", "reviewer", "ACT: approve the fixture"),
         ];
         let mut annotations = HashMap::new();
         annotations.insert(
             "run-1".to_string(),
             TriageAnnotation {
                 kind: Some("decide".to_string()),
-                run: Some("run-1".to_string()),
                 ..Default::default()
             },
         );
@@ -1007,14 +734,20 @@ mod tests {
             "run-2".to_string(),
             TriageAnnotation {
                 kind: Some("act".to_string()),
-                run: Some("run-2".to_string()),
                 ..Default::default()
             },
         );
-        let html = render_needs_you(&items, &[], &annotations);
+        let html = render_needs_you_with_dashboard_url(
+            &items,
+            &annotations,
+            "https://bitterblossom.example.test",
+        );
         assert!(html.contains(r#"<p class="ae-h">WAITING ON YOU &middot; 2</p>"#));
         assert!(html.contains(r#"<span class="ae-item">DECIDE: pick a path</span>"#));
-        assert!(html.contains("team-lead &middot; powder glass-1 &middot; asked "));
+        assert!(
+            html.contains("team-lead &middot; bitterblossom ask-1 &middot; decision &middot; open")
+        );
+        assert!(html.contains(r#"data-ask="ask-1""#));
         assert!(
             html.contains(r#"<button type="button" class="ae-button ae-button-quiet ny-open-btn""#)
         );
@@ -1024,119 +757,27 @@ mod tests {
 
     #[test]
     fn render_needs_you_marks_untriaged_items_when_no_annotation_exists() {
-        let items = vec![awaiting_item("glass-3", "run-3", "team-lead", "some ask")];
-        let html = render_needs_you(&items, &[], &HashMap::new());
+        let items = vec![open_ask("ask-3", "run-3", "team-lead", "some ask")];
+        let html = render_needs_you_with_dashboard_url(&items, &HashMap::new(), "#");
         assert!(html.contains("untriaged"));
         assert!(html.contains(r#"<span class="ae-item">some ask</span>"#));
     }
 
     #[test]
     fn render_needs_you_reports_an_explicit_empty_state() {
-        let html = render_needs_you(&[], &[], &HashMap::new());
+        let html = render_needs_you_with_dashboard_url(&[], &HashMap::new(), "#");
         assert!(html.contains("Nothing in the fleet is awaiting your input"));
     }
 
     #[test]
-    fn render_needs_you_only_shows_answered_fold_from_api_data() {
-        let no_answered = render_needs_you(&[], &[], &HashMap::new());
-        assert!(!no_answered.contains("ANSWERED"));
-
-        let answered = vec![AnsweredItem {
-            card: CardBrief {
-                id: "glass-1".to_string(),
-                title: "Shell work".to_string(),
-                repo: Some("glass".to_string()),
-                priority: Some("p1".to_string()),
-            },
-            question: Some(QuestionPayload {
-                payload: "DECIDE: keep it active?".to_string(),
-                created_at: Some(Utc::now().timestamp() - 120),
-            }),
-            run: RunInfo {
-                id: "run-1".to_string(),
-                agent: "glass-931-codex".to_string(),
-                created_at: Some(Utc::now().timestamp() - 300),
-            },
-            answer: Some("yes".to_string()),
-            answered_at: Some(Utc::now().timestamp() - 60),
-        }];
-        let html = render_needs_you(&[], &answered, &HashMap::new());
-        assert!(html.contains(r#"<details class="ae-fold ny-answered">"#));
-        assert!(html.contains("ANSWERED"));
-        assert!(html.contains("1 from API"));
-        assert!(html.contains("answered: yes"));
-    }
-
-    #[test]
-    fn render_needs_you_uses_operator_facing_board_url_when_configured() {
-        let items = vec![awaiting_item(
-            "glass-922",
-            "run-922",
-            "team-lead",
-            "pick the right board URL",
-        )];
-        let board_url = powder_board_url_from(
-            Some("https://powder.sanctum.tailnet"),
-            Some("http://127.0.0.1:4175"),
-        )
-        .expect("board URL");
-        let html = render_needs_you_with_board_url(&items, &[], &HashMap::new(), &board_url);
-
-        assert!(html.contains(r#"href="https://powder.sanctum.tailnet/board#card-glass-922""#));
-        assert!(!html.contains("http://127.0.0.1:4175"));
-    }
-
-    #[test]
-    fn board_url_falls_back_to_api_base_when_operator_url_is_unset() {
+    fn fetch_and_answer_urls_use_bitterblossom_asks() {
         assert_eq!(
-            powder_board_url_from(None, Some("http://127.0.0.1:4175/")),
-            Some("http://127.0.0.1:4175/board".to_string())
+            asks_url_from_api_base("http://127.0.0.1:8080/"),
+            "http://127.0.0.1:8080/api/asks"
         );
-    }
-
-    #[test]
-    fn board_url_does_not_duplicate_a_configured_board_path() {
         assert_eq!(
-            powder_board_url_from(Some("https://powder.sanctum.tailnet/board/"), None),
-            Some("https://powder.sanctum.tailnet/board".to_string())
+            answer_url_from_api_base("http://127.0.0.1:8080/", "ask-9"),
+            "http://127.0.0.1:8080/api/asks/ask-9/answer"
         );
-    }
-
-    #[test]
-    fn awaiting_fetch_url_keeps_using_the_api_base_when_board_url_differs() {
-        let api_base = "http://127.0.0.1:4175/";
-        let board_url =
-            powder_board_url_from(Some("https://powder.sanctum.tailnet"), Some(api_base))
-                .expect("board URL");
-
-        assert_eq!(board_url, "https://powder.sanctum.tailnet/board");
-        assert_eq!(
-            awaiting_input_url_from_api_base(api_base),
-            "http://127.0.0.1:4175/api/v1/runs/awaiting-input?limit=100"
-        );
-    }
-
-    #[test]
-    fn load_triage_annotations_keys_by_run_id() {
-        let dir = std::env::temp_dir().join(format!("glass-triage-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(".ask-triage.json");
-        std::fs::write(
-            &path,
-            r#"{"key1": {"kind": "decide", "run": "run-9", "card": "glass-9"}}"#,
-        )
-        .unwrap();
-        // SAFETY: test-local env var pointing to a test-local temp file;
-        // not touching any real secret or shared process-wide state a
-        // concurrent test could race on.
-        unsafe {
-            std::env::set_var("GLASS_ASK_TRIAGE_CACHE", &path);
-        }
-        let annotations = load_triage_annotations();
-        unsafe {
-            std::env::remove_var("GLASS_ASK_TRIAGE_CACHE");
-        }
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(annotations.contains_key("run-9"));
     }
 }

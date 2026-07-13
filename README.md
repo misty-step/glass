@@ -3,7 +3,7 @@
 Glass is the Misty Step live stage: a Rust service where agents publish typed
 surfaces during work and the operator watches them from the tailnet. Glass is
 ONE-WAY — there is no reply channel back to the producing agent; operator
-communication happens in Powder or another work surface.
+communication happens through an owning runtime or another work surface.
 
 It is intentionally Sideshow-compatible at the protocol level while replacing
 the runtime with a native Rust service.
@@ -16,8 +16,8 @@ the runtime with a native Rust service.
   claims and Glass live sessions, followed by the Wire of recent evidence. A
   claimed card with no Glass posts renders as claimed-quiet instead of
   disappearing.
-- `/needs-you` is the operator ask queue. It reads Powder awaiting-input runs
-  and relays answers to Powder; it does not create a Glass reply channel to the
+- `/needs-you` is the operator ask queue. It reads Bitterblossom asks and
+  relays answers to Bitterblossom; it does not create a Glass reply channel to the
   producing agent.
 - `/reports` is an ad-hoc query surface: choose scope and window, then render
   the report in place. Identical queries reuse the persisted render for 30
@@ -243,7 +243,7 @@ The same command runs in GitHub Actions. It keeps the original Rust floor
   checked-in `.coverage-ratchet` line-coverage floor while writing reports to
   `target/coverage/`
 - `scripts/e2e.sh`, which installs the pinned Playwright dependency, launches a
-  seeded local Glass server plus a mock Powder API, and browser-tests the
+  seeded local Glass server plus mock upstream APIs, and browser-tests the
   Now wall, report generation/reopen, Needs you answer relay, mobile shell,
   sandbox iframe path, and the fresh-operator report-library path
 

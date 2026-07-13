@@ -29,16 +29,17 @@ Agent-authored rich content is served from real URLs with a CSP sandbox that
 does not allow same-origin.
 
 Glass is one-way. Operator ruling glass-912, ratified 2026-07-07: no reply
-channel, ever. Glass shows what agents are doing; communication and approval
-happen in Powder or another work surface.
+channel to the producing agent. Glass shows what agents are doing. Needs You
+may project and relay an operator answer to the external runtime that owns an
+explicit ask; Glass does not persist or interpret that conversation.
 
 Glass runs tailnet-only, bastion-supervised, and Rust-first. Deterministic Rust
 owns storage, policy, routing, sandboxing, and gates.
 
 ## Non-goals
 
-- Glass is not the work ledger. Powder owns cards, claims, answers, and
-  durable operator communication.
+- Glass is not the work ledger. Powder owns cards and claims; runtimes such as
+  Bitterblossom own execution asks, answers, and resume semantics.
 - Glass is not standing docs. Glance and repository docs own long-lived
   reference material.
 - Glass has no accounts. Tailnet and bastion supervision provide the boundary.

@@ -14,7 +14,8 @@ const cards = [
     blocked_by: [],
     claim: {
       agent: "e2e-agent",
-      run_id: "run-now-rich",
+      id: "claim-now-rich",
+      runtime_ref: "run-now-rich",
       acquired_at: now - 300,
       expires_at: now + 3_600,
     },
@@ -29,7 +30,8 @@ const cards = [
     blocked_by: [],
     claim: {
       agent: "quiet-agent",
-      run_id: "run-now-quiet",
+      id: "claim-now-quiet",
+      runtime_ref: "run-now-quiet",
       acquired_at: now - 1_320,
       expires_at: now + 3_600,
     },
@@ -66,44 +68,33 @@ function seedAwaiting() {
   const now = Math.floor(Date.now() / 1000);
   return [
     {
-      card: {
-        id: "glass-931",
-        title: "Redesign 1/6 - the shell",
-        repo: "glass",
-        priority: "p1",
-      },
-      question: {
-        payload: "DECIDE: keep the rail active on viewer drill-downs?",
-        created_at: now - 120,
-      },
-      run: {
-        id: "run-shell",
-        agent: "glass-931-codex",
-        created_at: now - 240,
-      },
+      id: "ask-shell",
+      run_id: "run-shell",
+      task: "glass-931-codex",
+      kind: "decision",
+      question: "DECIDE: keep the rail active on viewer drill-downs?",
+      context: "Redesign 1/6 - the shell",
+      blocking: true,
+      state: "parked",
+      created_at: new Date((now - 120) * 1000).toISOString(),
+      answer: null,
     },
     {
-      card: {
-        id: "glass-933",
-        title: "Reports home",
-        repo: "glass",
-        priority: "p2",
-      },
-      question: {
-        payload: "ACT: confirm reports URL flip",
-        created_at: now - 600,
-      },
-      run: {
-        id: "run-reports",
-        agent: "glass-933-codex",
-        created_at: now - 900,
-      },
+      id: "ask-reports",
+      run_id: "run-reports",
+      task: "glass-933-codex",
+      kind: "act",
+      question: "ACT: confirm reports URL flip",
+      context: "Reports home",
+      blocking: false,
+      state: "open",
+      created_at: new Date((now - 600) * 1000).toISOString(),
+      answer: null,
     },
   ];
 }
 
 let awaiting = seedAwaiting();
-let answered = [];
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -114,7 +105,6 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/__reset") {
     awaiting = seedAwaiting();
-    answered = [];
     res.writeHead(204);
     res.end();
     return;
@@ -128,23 +118,23 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ cards: filtered }));
     return;
   }
-  if (url.pathname === "/api/v1/runs/awaiting-input") {
+  if (url.pathname === "/api/asks") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ awaiting, answered }));
+    res.end(JSON.stringify(awaiting));
     return;
   }
-  const answerMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/answer$/);
+  const answerMatch = url.pathname.match(/^\/api\/asks\/([^/]+)\/answer$/);
   if (req.method === "POST" && answerMatch) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
     });
     req.on("end", () => {
-      const runId = answerMatch[1];
-      const index = awaiting.findIndex((item) => item.run.id === runId);
+      const askId = answerMatch[1];
+      const index = awaiting.findIndex((item) => item.id === askId);
       if (index === -1) {
         res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "run not awaiting input" }));
+        res.end(JSON.stringify({ error: "ask not awaiting input" }));
         return;
       }
       let parsed = {};
@@ -152,13 +142,8 @@ const server = http.createServer((req, res) => {
         parsed = JSON.parse(body || "{}");
       } catch (e) {}
       const [item] = awaiting.splice(index, 1);
-      answered.push({
-        ...item,
-        answer: parsed.answer ?? "",
-        answered_at: Math.floor(Date.now() / 1000),
-      });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, run: { ...item.run, state: "active" } }));
+      res.end(JSON.stringify({ ask: { ...item, answer: parsed.answer ?? "" }, resumed_run_id: "run-resume" }));
     });
     return;
   }

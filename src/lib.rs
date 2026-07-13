@@ -1469,7 +1469,7 @@ async fn viewer() -> Html<String> {
     Html(shell::render_shell(shell::Shell {
         title: "Glass",
         active: Some(shell::Place::Now),
-        needs_you_count: needs_you::awaiting_input_count().await,
+        needs_you_count: needs_you::needs_you_count().await,
         sanctum_url: &sanctum_url(),
         styles: &styles,
         body: VIEWER_BODY,
@@ -1785,7 +1785,7 @@ async fn now(State(glass): State<Glass>) -> Result<Json<NowResponse>, ApiError> 
     let day_start = utc_day_start(now);
     let stats = NowStats {
         agents_live: wall.len(),
-        need_you_count: needs_you::awaiting_input_count().await,
+        need_you_count: needs_you::needs_you_count().await,
         posts_today: posts
             .iter()
             .filter(|post| post.created_at >= day_start || post.updated_at >= day_start)
@@ -2272,7 +2272,7 @@ async fn fetch_powder_active_claims() -> Result<Vec<PowderClaim>, String> {
         .build()
         .map_err(|err| format!("build Powder client: {err}"))?;
     let mut claims_by_id = BTreeMap::<String, PowderClaim>::new();
-    for status in ["claimed", "running", "awaiting_input"] {
+    for status in ["claimed", "running"] {
         let url = format!(
             "{}/api/v1/cards?status={status}&limit=100",
             base.trim_end_matches('/')

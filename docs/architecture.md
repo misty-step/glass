@@ -69,7 +69,7 @@ read-only detail dialog and exposes no reply or approval channel.
 ## Needs You
 
 `/needs-you` and `GET /api/needs-you` read Powder awaiting-input runs. Answers
-posted to `POST /api/needs-you/answer` are relayed to Powder's answer endpoint.
+posted to `POST /api/needs-you/answer` are relayed to Bitterblossom's ask endpoint.
 This is still one-way for Glass: the answer belongs to Powder's work ledger and
 does not create a reply channel to the producing agent inside Glass.
 
